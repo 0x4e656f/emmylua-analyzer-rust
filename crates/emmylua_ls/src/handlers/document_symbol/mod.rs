@@ -12,7 +12,7 @@ use lsp_types::{
 };
 use stats::{
     build_assign_stat_symbol, build_for_range_stat_symbol, build_for_stat_symbol,
-    build_func_stat_symbol, build_if_stat_symbol, build_local_func_stat_symbol,
+    build_func_stat_symbol, build_comment_symbol, build_if_stat_symbol, build_local_func_stat_symbol,
     build_local_stat_symbol,
 };
 use tokio_util::sync::CancellationToken;
@@ -87,6 +87,9 @@ fn build_child_document_symbols(
             }
             LuaAst::LuaIfStat(if_stat) => {
                 build_if_stat_symbol(builder, if_stat);
+            }
+            LuaAst::LuaComment(comment) => {
+                build_comment_symbol(builder, comment);
             }
             _ => {}
         }

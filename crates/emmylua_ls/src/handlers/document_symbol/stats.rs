@@ -1,6 +1,6 @@
 use emmylua_code_analysis::{LuaDeclId, LuaSignatureId, LuaType};
 use emmylua_parser::{
-    LuaAssignStat, LuaAstNode, LuaAstToken, LuaForRangeStat, LuaForStat, LuaFuncStat,
+    LuaAssignStat, LuaAstNode, LuaComment, LuaDocDescriptionOwner, LuaAstToken, LuaForRangeStat, LuaForStat, LuaFuncStat,
     LuaIfClauseStat, LuaIfStat, LuaLocalFuncStat, LuaLocalStat,
 };
 use lsp_types::SymbolKind;
@@ -186,6 +186,37 @@ pub fn build_if_stat_symbol(builder: &mut DocumentSymbolBuilder, if_stat: LuaIfS
         );
 
         builder.add_node_symbol(branch.syntax().clone(), symbol);
+    }
+
+    Some(())
+}
+
+fn extract_outline_comment(desc: &str) -> Option<String> {
+    let trimmed = desc.trim();
+    if trimmed.starts_with("MARK") {
+
+        let content = &trimmed[4..];
+        Some(content.to_string())
+    } else {
+        None
+    }
+}
+
+pub fn build_comment_symbol(
+    builder: &mut DocumentSymbolBuilder,
+    comment: LuaComment,
+) -> Option<()> {
+    let desc = comment.get_description()?;
+    let text = desc.get_description_text();
+
+    if let Some(stripped) = extract_outline_comment(&text) {
+        let symbol = LuaSymbol::new(
+            stripped,
+            None,
+            SymbolKind::FUNCTION,
+            comment.get_range(),
+        );
+        builder.add_node_symbol(comment.syntax().clone(), symbol);
     }
 
     Some(())
