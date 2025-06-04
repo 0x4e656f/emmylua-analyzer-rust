@@ -61,33 +61,33 @@ fn build_child_document_symbols(
 ) -> Option<()> {
     for child in root.descendants::<LuaAst>() {
         match child {
-            LuaAst::LuaLocalStat(local_stat) => {
-                build_local_stat_symbol(builder, local_stat);
-            }
-            LuaAst::LuaAssignStat(assign_stat) => {
-                build_assign_stat_symbol(builder, assign_stat);
-            }
-            LuaAst::LuaForStat(for_stat) => {
-                build_for_stat_symbol(builder, for_stat);
-            }
-            LuaAst::LuaForRangeStat(for_range_stat) => {
-                build_for_range_stat_symbol(builder, for_range_stat);
-            }
+            // LuaAst::LuaLocalStat(local_stat) => {
+            //     build_local_stat_symbol(builder, local_stat);
+            // }
+            // LuaAst::LuaAssignStat(assign_stat) => {
+            //     build_assign_stat_symbol(builder, assign_stat);
+            // }
+            // LuaAst::LuaForStat(for_stat) => {
+            //     build_for_stat_symbol(builder, for_stat);
+            // }
+            // LuaAst::LuaForRangeStat(for_range_stat) => {
+            //     build_for_range_stat_symbol(builder, for_range_stat);
+            // }
             LuaAst::LuaLocalFuncStat(local_func) => {
                 build_local_func_stat_symbol(builder, local_func);
             }
             LuaAst::LuaFuncStat(func) => {
                 build_func_stat_symbol(builder, func);
             }
-            LuaAst::LuaClosureExpr(closure) => {
-                build_closure_expr_symbol(builder, closure);
-            }
-            LuaAst::LuaTableExpr(table) => {
-                build_table_symbol(builder, table);
-            }
-            LuaAst::LuaIfStat(if_stat) => {
-                build_if_stat_symbol(builder, if_stat);
-            }
+            // LuaAst::LuaClosureExpr(closure) => {
+            //     build_closure_expr_symbol(builder, closure);
+            // }
+            // LuaAst::LuaTableExpr(table) => {
+            //     build_table_symbol(builder, table);
+            // }
+            // LuaAst::LuaIfStat(if_stat) => {
+            //     build_if_stat_symbol(builder, if_stat);
+            // }
             LuaAst::LuaComment(comment) => {
                 build_comment_symbol(builder, comment);
             }
