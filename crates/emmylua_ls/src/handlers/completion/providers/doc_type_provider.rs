@@ -2,7 +2,9 @@ use emmylua_code_analysis::LuaTypeDeclId;
 use emmylua_parser::{LuaAstNode, LuaDocNameType, LuaSyntaxKind, LuaTokenKind};
 use lsp_types::CompletionItem;
 
-use crate::handlers::completion::completion_builder::CompletionBuilder;
+use crate::handlers::completion::{
+    completion_builder::CompletionBuilder, completion_data::CompletionData,
+};
 
 pub fn add_completion(builder: &mut CompletionBuilder) -> Option<()> {
     if builder.is_cancelled() {
@@ -88,9 +90,16 @@ fn add_type_completion_item(
         None => lsp_types::CompletionItemKind::MODULE,
     };
 
+    let data = if let Some(id) = type_decl {
+        CompletionData::from_property_owner_id(builder, id.into(), None)
+    } else {
+        None
+    };
+
     let completion_item = CompletionItem {
         label: name.to_string(),
         kind: Some(kind),
+        data,
         ..CompletionItem::default()
     };
 

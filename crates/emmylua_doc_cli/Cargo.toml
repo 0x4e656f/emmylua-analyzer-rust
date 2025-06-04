@@ -1,6 +1,6 @@
 [package]
 name = "emmylua_doc_cli"
-version = "0.7.3"
+version = "0.8.0"
 edition = "2021"
 authors = ["CppCXY"]
 description = "A command-line tool for generating lua documentation."
@@ -26,6 +26,6 @@ serde_json.workspace = true
 lsp-types.workspace = true
 rowan.workspace = true
 walkdir.workspace = true
-structopt.workspace = true
 tera.workspace = true
 include_dir.workspace = true
+clap.workspace = true

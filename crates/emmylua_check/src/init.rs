@@ -4,48 +4,76 @@ use emmylua_code_analysis::{
     load_configs, load_workspace_files, update_code_style, EmmyLuaAnalysis, Emmyrc, LuaFileInfo,
 };
 
+fn root_from_configs(config_paths: &Vec<PathBuf>, fallback: &PathBuf) -> PathBuf {
+    if config_paths.len() != 1 {
+        fallback.clone()
+    } else {
+        let config_path = &config_paths[0];
+        // Need to convert to canonical path to ensure parent() is not an empty
+        // string in the case the path is a relative basename.
+        match config_path.canonicalize() {
+            Ok(path) => path.parent().unwrap().to_path_buf(),
+            Err(err) => {
+                log::error!(
+                    "Failed to canonicalize config path: \"{:?}\": {}",
+                    config_path,
+                    err
+                );
+                fallback.clone()
+            }
+        }
+    }
+}
+
 pub fn load_workspace(
     workspace_folder: PathBuf,
-    config_path: Option<PathBuf>,
+    config_paths: Option<Vec<PathBuf>>,
     ignore: Option<Vec<String>>,
 ) -> Option<EmmyLuaAnalysis> {
-    let mut analysis = EmmyLuaAnalysis::new();
-    analysis.init_std_lib(None);
-
     let mut workspace_folders = vec![workspace_folder];
+    let main_path = workspace_folders.first()?.clone();
+    let (config_files, config_root): (Vec<PathBuf>, PathBuf) =
+        if let Some(config_paths) = config_paths {
+            (
+                config_paths.clone(),
+                root_from_configs(&config_paths, &main_path),
+            )
+        } else {
+            (
+                vec![
+                    main_path.join(".luarc.json"),
+                    main_path.join(".emmyrc.json"),
+                ]
+                .into_iter()
+                .filter(|path| path.exists())
+                .collect(),
+                main_path.clone(),
+            )
+        };
+
+    let mut emmyrc = load_configs(config_files, None);
+    log::info!(
+        "Pre processing configurations using root: \"{}\"",
+        config_root.display()
+    );
+    emmyrc.pre_process_emmyrc(&config_root);
+
+    for lib in &emmyrc.workspace.library {
+        workspace_folders.push(PathBuf::from_str(lib).unwrap());
+    }
+
+    let mut analysis = EmmyLuaAnalysis::new();
+
     for path in &workspace_folders {
         analysis.add_main_workspace(path.clone());
     }
-
-    let main_path = workspace_folders.first()?.clone();
-    let (config_files, config_root) = if let Some(config_path) = config_path {
-        (
-            vec![config_path.clone()],
-            config_path.parent().unwrap().to_path_buf(),
-        )
-    } else {
-        (
-            vec![
-                main_path.join(".luarc.json"),
-                main_path.join(".emmyrc.json"),
-            ],
-            main_path.clone(),
-        )
-    };
-
-    let mut emmyrc = load_configs(config_files, None);
-    emmyrc.pre_process_emmyrc(&config_root);
 
     for root in &emmyrc.workspace.workspace_roots {
         analysis.add_main_workspace(PathBuf::from_str(root).unwrap());
     }
 
-    for lib in &emmyrc.workspace.library {
-        analysis.add_main_workspace(PathBuf::from_str(lib).unwrap());
-        workspace_folders.push(PathBuf::from_str(lib).unwrap());
-    }
-
     analysis.update_config(Arc::new(emmyrc));
+    analysis.init_std_lib(None);
 
     let file_infos = collect_files(&workspace_folders, &analysis.emmyrc, ignore);
     let files = file_infos
@@ -110,23 +138,29 @@ pub fn calculate_include_and_exclude(
 
     for extension in &emmyrc.runtime.extensions {
         if extension.starts_with(".") {
+            log::info!("Adding extension: **/*{}", extension);
             include.push(format!("**/*{}", extension));
         } else if extension.starts_with("*.") {
+            log::info!("Adding extension: **/{}", extension);
             include.push(format!("**/{}", extension));
         } else {
+            log::info!("Adding extension: {}", extension);
             include.push(extension.clone());
         }
     }
 
     for ignore_glob in &emmyrc.workspace.ignore_globs {
+        log::info!("Adding ignore glob: {}", ignore_glob);
         exclude.push(ignore_glob.clone());
     }
 
     if let Some(ignore) = ignore {
+        log::info!("Adding ignores from \"--ignore\": {:?}", ignore);
         exclude.extend(ignore);
     }
 
     for dir in &emmyrc.workspace.ignore_dir {
+        log::info!("Adding ignore dir: {}", dir);
         exclude_dirs.push(PathBuf::from(dir));
     }
 

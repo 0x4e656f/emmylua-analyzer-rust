@@ -3,7 +3,10 @@ use emmylua_parser::{LuaAstNode, LuaNameExpr};
 use lsp_types::{CompletionItem, Position};
 
 use crate::{
-    handlers::{command::make_auto_require, completion::completion_builder::CompletionBuilder},
+    handlers::{
+        command::make_auto_require,
+        completion::{completion_builder::CompletionBuilder, completion_data::CompletionData},
+    },
     util::module_name_convert,
 };
 
@@ -74,6 +77,11 @@ fn add_module_completion_item(
         return None;
     }
 
+    let data = if let Some(property_id) = &module_info.property_owner_id {
+        CompletionData::from_property_owner_id(builder, property_id.clone(), None)
+    } else {
+        None
+    };
     let completion_item = CompletionItem {
         label: completion_name,
         kind: Some(lsp_types::CompletionItemKind::MODULE),
@@ -87,6 +95,7 @@ fn add_module_completion_item(
             module_info.file_id,
             position,
         )),
+        data,
         ..Default::default()
     };
 

@@ -1,10 +1,11 @@
-use emmylua_code_analysis::Emmyrc;
 use emmylua_parser::{
-    LuaAstNode, LuaAstToken, LuaCallArgList, LuaCallExpr, LuaExpr, LuaLiteralExpr, LuaStringToken,
+    LuaAstNode, LuaAstToken, LuaCallArgList, LuaCallExpr, LuaLiteralExpr, LuaStringToken,
 };
 use lsp_types::{CompletionItem, CompletionTextEdit, TextEdit};
 
-use crate::handlers::completion::completion_builder::CompletionBuilder;
+use crate::handlers::completion::{
+    completion_builder::CompletionBuilder, completion_data::CompletionData,
+};
 
 use super::get_text_edit_range_in_string;
 
@@ -14,21 +15,14 @@ pub fn add_completion(builder: &mut CompletionBuilder) -> Option<()> {
     }
 
     let string_token = LuaStringToken::cast(builder.trigger_token.clone())?;
-    let call_expr_prefix = string_token
+    let call_expr = string_token
         .get_parent::<LuaLiteralExpr>()?
         .get_parent::<LuaCallArgList>()?
-        .get_parent::<LuaCallExpr>()?
-        .get_prefix_expr()?;
+        .get_parent::<LuaCallExpr>()?;
 
     let emmyrc = builder.semantic_model.get_emmyrc();
-    match call_expr_prefix {
-        LuaExpr::NameExpr(name_expr) => {
-            let name = name_expr.get_name_text()?;
-            if !is_require_call(emmyrc, &name) {
-                return None;
-            }
-        }
-        _ => return None,
+    if !call_expr.is_require() {
+        return None;
     }
 
     let version_number = emmyrc.runtime.version.to_lua_version_number();
@@ -64,6 +58,12 @@ pub fn add_completion(builder: &mut CompletionBuilder) -> Option<()> {
         };
         if let Some(child_file_id) = child_module_node.file_ids.first() {
             let child_module_info = db.get_module_index().get_module(*child_file_id)?;
+            let data = if let Some(property_id) = &child_module_info.property_owner_id {
+                CompletionData::from_property_owner_id(builder, property_id.clone(), None)
+            } else {
+                None
+            };
+
             if child_module_info.is_visible(&version_number) {
                 let uri = db.get_vfs().get_uri(child_file_id)?;
                 let completion_item = CompletionItem {
@@ -72,6 +72,7 @@ pub fn add_completion(builder: &mut CompletionBuilder) -> Option<()> {
                     filter_text: Some(filter_text.clone()),
                     text_edit: Some(CompletionTextEdit::Edit(text_edit)),
                     detail: Some(uri.to_string()),
+                    data,
                     ..Default::default()
                 };
                 module_completions.push(completion_item);
@@ -96,14 +97,4 @@ pub fn add_completion(builder: &mut CompletionBuilder) -> Option<()> {
     builder.stop_here();
 
     Some(())
-}
-
-fn is_require_call(emmyrc: &Emmyrc, name: &str) -> bool {
-    for fun in &emmyrc.runtime.require_like_function {
-        if name == fun {
-            return true;
-        }
-    }
-
-    name == "require"
 }
