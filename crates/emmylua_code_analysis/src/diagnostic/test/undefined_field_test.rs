@@ -598,4 +598,141 @@ mod test {
         "#
         ));
     }
+
+    #[test]
+    fn test_if_1() {
+        let mut ws = VirtualWorkspace::new();
+        assert!(ws.check_code_for(
+            DiagnosticCode::UndefinedField,
+            r#"
+            ---@type table<int, string>
+            local arg = {}
+            if arg['test'] == 'true' then
+            end
+        "#
+        ));
+    }
+
+    #[test]
+    fn test_enum_field_1() {
+        let mut ws = VirtualWorkspace::new();
+        ws.def(
+            r#"
+                ---@enum Enum
+                local Enum = {
+                    a = 1,
+                }
+        "#,
+        );
+        assert!(!ws.check_code_for(
+            DiagnosticCode::UndefinedField,
+            r#"
+                ---@param p Enum
+                function func(p)
+                    local x1 = p.a
+                end
+        "#
+        ));
+
+        assert!(!ws.check_code_for(
+            DiagnosticCode::UndefinedField,
+            r#"
+                ---@param p Enum
+                function func(p)
+                    local x1 = p
+                    local x2 = x1.a
+                end
+        "#
+        ));
+
+        assert!(!ws.check_code_for(
+            DiagnosticCode::UndefinedField,
+            r#"
+                ---@param p Enum
+                function func(p)
+                    local x1 = p
+                    local x2 = x1
+                    local x3 = x2.a
+                end
+        "#
+        ));
+    }
+
+    #[test]
+    fn test_if_custom_type_1() {
+        let mut ws = VirtualWorkspace::new();
+        ws.def(
+            r#"
+                ---@enum Flags
+                Flags = {
+                    b = 1
+                }
+            "#,
+        );
+        assert!(!ws.check_code_for(
+            DiagnosticCode::UndefinedField,
+            r#"
+
+                if Flags.a then
+                end
+        "#
+        ));
+
+        assert!(!ws.check_code_for(
+            DiagnosticCode::UndefinedField,
+            r#"
+
+                if Flags['a'] then
+                end
+        "#
+        ));
+    }
+
+    #[test]
+    fn test_if_custom_type_2() {
+        let mut ws = VirtualWorkspace::new();
+        ws.def(
+            r#"
+                ---@class Flags
+                ---@field a number
+                Flags = {}
+            "#,
+        );
+
+        assert!(!ws.check_code_for(
+            DiagnosticCode::UndefinedField,
+            r#"
+                if Flags.b then
+                end
+        "#
+        ));
+
+        assert!(ws.check_code_for(
+            DiagnosticCode::UndefinedField,
+            r#"
+                if Flags["b"] then
+                end
+        "#
+        ));
+
+        assert!(ws.check_code_for(
+            DiagnosticCode::UndefinedField,
+            r#"
+                ---@type string
+                local a
+                if Flags[a] then
+                end
+        "#
+        ));
+
+        assert!(ws.check_code_for(
+            DiagnosticCode::UndefinedField,
+            r#"
+                ---@type string
+                local c
+                if Flags[c] then
+                end
+        "#
+        ));
+    }
 }

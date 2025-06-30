@@ -207,6 +207,8 @@ fn parse_tag_alias(p: &mut LuaDocParser) -> ParseResult {
         parse_generic_decl_list(p, true)?;
     }
 
+    if_token_bump(p, LuaTokenKind::TkDocDetail);
+
     parse_type(p)?;
 
     p.set_state(LuaDocLexerState::Description);
@@ -416,11 +418,20 @@ fn parse_tag_overload(p: &mut LuaDocParser) -> ParseResult {
 // ---@cast a +?
 // ---@cast a +string, -number
 fn parse_tag_cast(p: &mut LuaDocParser) -> ParseResult {
-    p.set_state(LuaDocLexerState::Normal);
+    p.set_state(LuaDocLexerState::CastExpr);
     let m = p.mark(LuaSyntaxKind::DocTagCast);
     p.bump();
-    expect_token(p, LuaTokenKind::TkName)?;
 
+    if p.current_token() == LuaTokenKind::TkName {
+        match parse_cast_expr(p) {
+            Ok(_) => {}
+            Err(e) => {
+                return Err(e);
+            }
+        }
+    }
+
+    // 切换回正常状态
     parse_op_type(p)?;
     while p.current_token() == LuaTokenKind::TkComma {
         p.bump();
@@ -430,6 +441,25 @@ fn parse_tag_cast(p: &mut LuaDocParser) -> ParseResult {
     p.set_state(LuaDocLexerState::Description);
     parse_description(p);
     Ok(m.complete(p))
+}
+
+fn parse_cast_expr(p: &mut LuaDocParser) -> ParseResult {
+    let m = p.mark(LuaSyntaxKind::NameExpr);
+    p.bump();
+    let mut cm = m.complete(p);
+    // 处理多级字段访问
+    while p.current_token() == LuaTokenKind::TkDot {
+        let index_m = cm.precede(p, LuaSyntaxKind::IndexExpr);
+        p.bump();
+        if p.current_token() == LuaTokenKind::TkName {
+            p.bump();
+        } else {
+            // 找不到也不报错
+        }
+        cm = index_m.complete(p);
+    }
+
+    Ok(cm)
 }
 
 // +<type>, -<type>, +?, <type>

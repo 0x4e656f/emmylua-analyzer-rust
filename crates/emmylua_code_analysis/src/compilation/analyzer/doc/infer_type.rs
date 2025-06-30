@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use emmylua_parser::{
-    LuaAst, LuaAstNode, LuaDocBinaryType, LuaDocFuncType, LuaDocGenericType,
-    LuaDocMultiLineUnionType, LuaDocObjectFieldKey, LuaDocObjectType, LuaDocStrTplType, LuaDocType,
-    LuaDocUnaryType, LuaDocVariadicType, LuaLiteralToken, LuaSyntaxKind, LuaTypeBinaryOperator,
-    LuaTypeUnaryOperator, LuaVarExpr,
+    LuaAst, LuaAstNode, LuaDocBinaryType, LuaDocDescriptionOwner, LuaDocFuncType,
+    LuaDocGenericType, LuaDocMultiLineUnionType, LuaDocObjectFieldKey, LuaDocObjectType,
+    LuaDocStrTplType, LuaDocType, LuaDocUnaryType, LuaDocVariadicType, LuaLiteralToken,
+    LuaSyntaxKind, LuaTypeBinaryOperator, LuaTypeUnaryOperator, LuaVarExpr,
 };
 use rowan::TextRange;
 use smol_str::SmolStr;
@@ -14,8 +14,8 @@ use crate::{
         AnalyzeError, LuaAliasCallType, LuaFunctionType, LuaGenericType, LuaIndexAccessKey,
         LuaIntersectionType, LuaObjectType, LuaStringTplType, LuaTupleType, LuaType, LuaUnionType,
     },
-    DiagnosticCode, GenericTpl, InFiled, LuaAliasCallKind, LuaMultiLineUnion, LuaTypeDeclId,
-    TypeOps, VariadicType,
+    DiagnosticCode, GenericTpl, InFiled, LuaAliasCallKind, LuaMultiLineUnion, LuaTupleStatus,
+    LuaTypeDeclId, TypeOps, VariadicType,
 };
 
 use super::{preprocess_description, DocAnalyzer};
@@ -82,7 +82,7 @@ pub fn infer_type(analyzer: &mut DocAnalyzer, node: LuaDocType) -> LuaType {
                 }
                 types.push(t);
             }
-            return LuaType::Tuple(LuaTupleType::new(types).into());
+            return LuaType::Tuple(LuaTupleType::new(types, LuaTupleStatus::DocResolve).into());
         }
         LuaDocType::Generic(generic_type) => {
             return infer_generic_type(analyzer, generic_type);
@@ -588,7 +588,8 @@ fn infer_multi_line_union_type(
         };
 
         let description = if let Some(description) = field.get_description() {
-            let description_text = preprocess_description(&description.get_description_text());
+            let description_text =
+                preprocess_description(&description.get_description_text(), None);
             if !description_text.is_empty() {
                 Some(description_text)
             } else {

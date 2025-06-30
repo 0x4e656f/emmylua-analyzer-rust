@@ -1,5 +1,7 @@
 #[cfg(test)]
 mod tests {
+    use lsp_types::GotoDefinitionResponse;
+
     use crate::handlers::test_lib::ProviderVirtualWorkspace;
 
     #[test]
@@ -7,7 +9,7 @@ mod tests {
         let mut ws = ProviderVirtualWorkspace::new();
         ws.check_definition(
             r#"
-                ---@generic T: string
+                ---@generic T
                 ---@param name `T`
                 ---@return T
                 local function new(name)
@@ -27,7 +29,7 @@ mod tests {
         ws.check_definition(
             r#"
                 ---@class T
-                ---@field func fun(self:string) 注释注释
+                ---@field func fun(self:string)
 
                 ---@type T
                 local t = {
@@ -56,5 +58,119 @@ mod tests {
                 t:func<??>()
             "#,
         );
+    }
+
+    #[test]
+    fn test_goto_field() {
+        let mut ws = ProviderVirtualWorkspace::new();
+        ws.check_definition(
+            r#"
+                local t = {}
+                function t:test(a)
+                    self.abc = a
+                end
+
+                print(t.abc<??>)
+            "#,
+        );
+    }
+
+    #[test]
+    fn test_goto_overload() {
+        let mut ws = ProviderVirtualWorkspace::new();
+        ws.def(
+            r#"
+                ---@class Goto1
+                ---@class Goto2
+                ---@class Goto3
+
+                ---@class T
+                ---@field func fun(a:Goto1) # 1
+                ---@field func fun(a:Goto2) # 2
+                ---@field func fun(a:Goto3) # 3
+                local T = {}
+
+                function T:func(a)
+                end
+            "#,
+        );
+
+        {
+            let result = ws
+                .check_definition(
+                    r#"
+                ---@type Goto2
+                local Goto2
+
+                ---@type T
+                local t
+                t.fu<??>nc(Goto2)
+                 "#,
+                )
+                .unwrap();
+            match result {
+                GotoDefinitionResponse::Array(array) => {
+                    assert_eq!(array.len(), 2);
+                }
+                _ => {
+                    panic!("expect array");
+                }
+            }
+        }
+
+        {
+            let result = ws
+                .check_definition(
+                    r#"
+                ---@type T
+                local t
+                t.fu<??>nc()
+                 "#,
+                )
+                .unwrap();
+            match result {
+                GotoDefinitionResponse::Array(array) => {
+                    assert_eq!(array.len(), 4);
+                }
+                _ => {
+                    panic!("expect array");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_goto_return_field() {
+        let mut ws = ProviderVirtualWorkspace::new();
+        ws.def_file(
+            "test.lua",
+            r#"
+            local function test()
+
+            end
+
+            return {
+                test = test,
+            }
+            "#,
+        );
+        let result = ws
+            .check_definition(
+                r#"
+            local t = require("test")
+            local test = t.test
+            te<??>st()
+            "#,
+            )
+            .unwrap();
+        match result {
+            GotoDefinitionResponse::Array(locations) => {
+                assert_eq!(locations.len(), 1);
+                assert_eq!(locations[0].range.start.line, 1);
+            }
+            _ => {
+                panic!("expect scalar");
+            }
+        }
     }
 }

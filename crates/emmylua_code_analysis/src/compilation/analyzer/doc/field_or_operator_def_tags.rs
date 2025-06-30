@@ -6,6 +6,7 @@ use emmylua_parser::{
 };
 
 use crate::{
+    compilation::analyzer::doc::preprocess_description,
     db_index::{
         LuaMember, LuaMemberKey, LuaMemberOwner, LuaOperator, LuaOperatorMetaMethod,
         LuaSemanticDeclId, LuaType,
@@ -56,16 +57,23 @@ pub fn analyze_field(analyzer: &mut DocAnalyzer, tag: LuaDocTagField) -> Option<
             LuaSemanticDeclId::Member(member_id),
         ),
     };
-
     if nullable && !field_type.is_nullable() {
         field_type = TypeOps::Union.apply(analyzer.db, &field_type, &LuaType::Nil);
     }
 
-    let description = if let Some(description) = tag.get_description() {
-        Some(description.get_description_text().to_string())
-    } else {
-        None
-    };
+    let mut description = String::new();
+
+    for desc in tag.get_descriptions() {
+        let mut desc_text = desc.get_description_text().to_string();
+        if !desc_text.is_empty() {
+            let text = preprocess_description(&mut desc_text, Some(&property_owner));
+            if !description.is_empty() {
+                description.push_str("\n\n");
+            }
+
+            description.push_str(&text);
+        }
+    }
 
     let field_key = tag.get_field_key()?;
     let key = match field_key {
@@ -135,7 +143,7 @@ pub fn analyze_field(analyzer: &mut DocAnalyzer, tag: LuaDocTagField) -> Option<
         );
     }
 
-    if let Some(description) = description {
+    if !description.is_empty() {
         analyzer.db.get_property_index_mut().add_description(
             analyzer.file_id,
             property_owner.clone(),

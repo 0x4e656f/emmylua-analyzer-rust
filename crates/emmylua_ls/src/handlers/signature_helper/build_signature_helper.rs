@@ -1,6 +1,6 @@
 use emmylua_code_analysis::{
-    DbIndex, InFiled, LuaFunctionType, LuaInstanceType, LuaOperatorMetaMethod, LuaOperatorOwner,
-    LuaSignatureId, LuaType, LuaTypeDeclId, RenderLevel, SemanticModel,
+    DbIndex, InFiled, LuaCompilation, LuaFunctionType, LuaInstanceType, LuaOperatorMetaMethod,
+    LuaOperatorOwner, LuaSignatureId, LuaType, LuaTypeDeclId, RenderLevel, SemanticModel,
 };
 use emmylua_parser::{LuaAstNode, LuaCallExpr, LuaSyntaxToken, LuaTokenKind};
 use lsp_types::{
@@ -15,12 +15,13 @@ use super::signature_helper_builder::SignatureHelperBuilder;
 
 pub fn build_signature_helper(
     semantic_model: &SemanticModel,
+    compilation: &LuaCompilation,
     call_expr: LuaCallExpr,
     token: LuaSyntaxToken,
 ) -> Option<SignatureHelp> {
     let prefix_expr = call_expr.get_prefix_expr()?;
     let prefix_expr_type = semantic_model.infer_expr(prefix_expr.clone()).ok()?;
-    let builder = SignatureHelperBuilder::new(semantic_model, call_expr.clone());
+    let builder = SignatureHelperBuilder::new(compilation, semantic_model, call_expr.clone());
     let colon_call = call_expr.is_colon_call();
     let current_idx = get_current_param_index(&call_expr, &token)?;
     let help = match prefix_expr_type {
@@ -276,7 +277,7 @@ fn build_type_signature_help(
 
     for operator_id in operator_ids {
         let operator = db.get_operator_index().get_operator(operator_id)?;
-        let call_type = operator.get_operator_func();
+        let call_type = operator.get_operator_func(db);
         match call_type {
             LuaType::DocFunction(func_type) => {
                 return build_doc_function_signature_help(
@@ -336,7 +337,7 @@ fn build_table_call_signature_help(
         .get_operators(&operator_owner, LuaOperatorMetaMethod::Call)?
         .first()?;
     let operator = db.get_operator_index().get_operator(operator_ids)?;
-    let call_type = operator.get_operator_func();
+    let call_type = operator.get_operator_func(db);
     match call_type {
         LuaType::DocFunction(func_type) => {
             return build_doc_function_signature_help(builder, &func_type, colon_call, current_idx);

@@ -130,13 +130,27 @@ pub fn check_simple_type_compact(
 
                 return Err(TypeCheckFailReason::TypeNotMatch);
             }
-            LuaType::Integer => return Err(TypeCheckFailReason::TypeNotMatch),
+            LuaType::Integer => {
+                if db.get_emmyrc().strict.doc_base_const_match_base_type {
+                    return Ok(());
+                }
+                return Err(TypeCheckFailReason::TypeNotMatch);
+            }
             LuaType::DocIntegerConst(j) => {
                 if i == j {
                     return Ok(());
                 }
 
                 return Err(TypeCheckFailReason::TypeNotMatch);
+            }
+            LuaType::Ref(_) => {
+                if db.get_emmyrc().strict.doc_base_const_match_base_type {
+                    match check_base_type_for_ref_compact(db, source, compact_type, check_guard) {
+                        Ok(_) => return Ok(()),
+                        Err(err) if err.is_type_not_match() => {}
+                        Err(err) => return Err(err),
+                    }
+                }
             }
             _ => {}
         },
@@ -155,6 +169,15 @@ pub fn check_simple_type_compact(
                 }
 
                 return Err(TypeCheckFailReason::TypeNotMatch);
+            }
+            LuaType::Ref(_) => {
+                if db.get_emmyrc().strict.doc_base_const_match_base_type {
+                    match check_base_type_for_ref_compact(db, source, compact_type, check_guard) {
+                        Ok(_) => return Ok(()),
+                        Err(err) if err.is_type_not_match() => {}
+                        Err(err) => return Err(err),
+                    }
+                }
             }
             _ => {}
         },
@@ -237,6 +260,7 @@ fn get_alias_real_type<'a>(
     Ok(compact_type)
 }
 
+/// 检查基础类型是否匹配自定义类型
 fn check_base_type_for_ref_compact(
     db: &DbIndex,
     source: &LuaType,
@@ -310,27 +334,33 @@ fn check_variadic_type_compact(
     check_guard: TypeCheckGuard,
 ) -> TypeCheckResult {
     match &source_type {
-        VariadicType::Base(source_base) => {
-            if let LuaType::Variadic(compact_variadic) = compact_type {
-                match compact_variadic.deref() {
-                    VariadicType::Base(compact_base) => {
-                        if source_base == compact_base {
-                            return Ok(());
-                        }
-                    }
-                    VariadicType::Multi(compact_multi) => {
-                        for compact_type in compact_multi {
-                            check_simple_type_compact(
-                                db,
-                                source_base,
-                                compact_type,
-                                check_guard.next_level()?,
-                            )?;
-                        }
+        VariadicType::Base(source_base) => match compact_type {
+            LuaType::Variadic(compact_variadic) => match compact_variadic.deref() {
+                VariadicType::Base(compact_base) => {
+                    if source_base == compact_base {
+                        return Ok(());
                     }
                 }
+                VariadicType::Multi(compact_multi) => {
+                    for compact_type in compact_multi {
+                        check_simple_type_compact(
+                            db,
+                            source_base,
+                            compact_type,
+                            check_guard.next_level()?,
+                        )?;
+                    }
+                }
+            },
+            _ => {
+                check_simple_type_compact(
+                    db,
+                    source_base,
+                    compact_type,
+                    check_guard.next_level()?,
+                )?;
             }
-        }
+        },
         VariadicType::Multi(_) => {}
     }
 

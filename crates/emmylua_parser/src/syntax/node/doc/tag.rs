@@ -1,13 +1,15 @@
 use crate::{
-    kind::LuaSyntaxKind, syntax::traits::LuaAstNode, BinaryOperator, LuaAstChildren, LuaAstToken,
-    LuaAstTokenChildren, LuaBinaryOpToken, LuaDocVersionNumberToken, LuaDocVisibilityToken,
-    LuaGeneralToken, LuaKind, LuaNameToken, LuaNumberToken, LuaPathToken, LuaStringToken,
-    LuaSyntaxNode, LuaTokenKind, LuaVersionCondition,
+    kind::LuaSyntaxKind,
+    syntax::{traits::LuaAstNode, LuaDocDescriptionOwner},
+    BinaryOperator, LuaAstChildren, LuaAstToken, LuaAstTokenChildren, LuaBinaryOpToken,
+    LuaDocVersionNumberToken, LuaDocVisibilityToken, LuaExpr, LuaGeneralToken, LuaKind,
+    LuaNameToken, LuaNumberToken, LuaPathToken, LuaStringToken, LuaSyntaxNode, LuaTokenKind,
+    LuaVersionCondition,
 };
 
 use super::{
-    description::{LuaDocDescriptionOwner, LuaDocDetailOwner},
-    LuaDocAttribute, LuaDocGenericDeclList, LuaDocOpType, LuaDocType, LuaDocTypeList,
+    description::LuaDocDetailOwner, LuaDocAttribute, LuaDocGenericDeclList, LuaDocOpType,
+    LuaDocType, LuaDocTypeList,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -992,8 +994,8 @@ impl LuaDocTagCast {
         self.children()
     }
 
-    pub fn get_name_token(&self) -> Option<LuaNameToken> {
-        self.token()
+    pub fn get_key_expr(&self) -> Option<LuaExpr> {
+        self.child()
     }
 }
 

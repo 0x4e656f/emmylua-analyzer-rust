@@ -1,17 +1,15 @@
 use std::collections::HashSet;
 
-use emmylua_code_analysis::{LuaMemberInfo, LuaMemberKey, LuaType};
-use emmylua_parser::{LuaAst, LuaAstNode, LuaTableExpr, LuaTableField};
+use emmylua_code_analysis::{get_real_type, LuaMemberInfo, LuaMemberKey, LuaType};
+use emmylua_parser::{LuaAst, LuaAstNode, LuaKind, LuaTableExpr, LuaTableField, LuaTokenKind};
 use lsp_types::{CompletionItem, InsertTextFormat, InsertTextMode};
 use rowan::NodeOrToken;
 
 use crate::handlers::completion::{
-    add_completions::{check_visibility, get_detail, is_deprecated, CallDisplay},
+    add_completions::{check_visibility, is_deprecated},
     completion_builder::CompletionBuilder,
     completion_data::CompletionData,
 };
-
-use super::get_real_type;
 
 pub fn add_completion(builder: &mut CompletionBuilder) -> Option<()> {
     add_table_field_key_completion(builder);
@@ -22,9 +20,25 @@ pub fn add_completion(builder: &mut CompletionBuilder) -> Option<()> {
 
 fn add_table_field_key_completion(builder: &mut CompletionBuilder) -> Option<()> {
     if !can_add_key_completion(builder) {
-        return Some(());
+        return None;
     }
-    let table_expr = get_table_expr(builder)?;
+    // 出现以下情况则代表是补全 value
+    let prev_token = builder.trigger_token.prev_token()?;
+    if builder.trigger_token.kind() == LuaKind::Token(LuaTokenKind::TkWhitespace)
+        && prev_token.kind() == LuaKind::Token(LuaTokenKind::TkAssign)
+    {
+        return None;
+    }
+
+    let node = LuaAst::cast(builder.trigger_token.parent()?)?;
+    let table_expr = match node {
+        LuaAst::LuaTableExpr(table_expr) => Some(table_expr),
+        LuaAst::LuaNameExpr(name_expr) => name_expr
+            .get_parent::<LuaTableField>()?
+            .get_parent::<LuaTableExpr>(),
+        _ => None,
+    }?;
+
     let table_type = builder
         .semantic_model
         .infer_table_should_be(table_expr.clone())?;
@@ -65,18 +79,6 @@ fn can_add_key_completion(builder: &mut CompletionBuilder) -> bool {
         }
     }
     true
-}
-
-fn get_table_expr(builder: &mut CompletionBuilder) -> Option<LuaTableExpr> {
-    let node = LuaAst::cast(builder.trigger_token.parent()?)?;
-
-    match node {
-        LuaAst::LuaTableExpr(table_expr) => Some(table_expr),
-        LuaAst::LuaNameExpr(name_expr) => name_expr
-            .get_parent::<LuaTableField>()?
-            .get_parent::<LuaTableExpr>(),
-        _ => None,
-    }
 }
 
 fn add_field_key_completion(
@@ -232,7 +234,7 @@ fn add_field_value_completion(
 ) -> Option<()> {
     let real_type = get_real_type(&builder.semantic_model.get_db(), &member_info.typ)?;
     if real_type.is_function() {
-        let label_detail = get_detail(builder, real_type, CallDisplay::None);
+        let label_detail = get_function_detail(builder, real_type);
         let item = CompletionItem {
             label: "fun".to_string(),
             label_details: Some(lsp_types::CompletionItemLabelDetails {
@@ -253,4 +255,33 @@ fn add_field_value_completion(
     }
 
     None
+}
+
+fn get_function_detail(builder: &CompletionBuilder, typ: &LuaType) -> Option<String> {
+    match typ {
+        LuaType::Signature(signature_id) => {
+            let signature = builder
+                .semantic_model
+                .get_db()
+                .get_signature_index()
+                .get(&signature_id)?;
+
+            let params_str = signature
+                .get_type_params()
+                .iter()
+                .map(|param| param.0.clone())
+                .collect::<Vec<_>>();
+
+            Some(format!("({})", params_str.join(", ")))
+        }
+        LuaType::DocFunction(f) => {
+            let params_str = f
+                .get_params()
+                .iter()
+                .map(|param| param.0.clone())
+                .collect::<Vec<_>>();
+            Some(format!("({})", params_str.join(", ")))
+        }
+        _ => None,
+    }
 }

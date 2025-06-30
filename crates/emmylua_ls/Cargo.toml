@@ -1,6 +1,6 @@
 [package]
 name = "emmylua_ls"
-version = "0.8.0"
+version = "0.8.2"
 edition = "2021"
 authors = ["CppCXY"]
 description = "A language server for emmylua."
@@ -34,3 +34,4 @@ serde_yml.workspace = true
 itertools.workspace = true
 dirs.workspace = true
 clap.workspace = true
+wax.workspace = true

@@ -8,7 +8,7 @@ use emmylua_parser::{
 use crate::{
     db_index::{DbIndex, LuaType},
     infer_call_expr_func, infer_expr, InferGuard, LuaDeclId, LuaInferCache, LuaMemberId,
-    LuaTupleType, VariadicType,
+    LuaTupleStatus, LuaTupleType, VariadicType,
 };
 
 use super::{
@@ -57,7 +57,9 @@ fn infer_table_tuple_or_array(
                         return Ok(LuaType::Array(base.clone().into()));
                     }
                     VariadicType::Multi(tuple) => {
-                        return Ok(LuaType::Tuple(LuaTupleType::new(tuple.clone()).into()));
+                        return Ok(LuaType::Tuple(
+                            LuaTupleType::new(tuple.clone(), LuaTupleStatus::InferResolve).into(),
+                        ));
                     }
                 },
                 _ => {
@@ -79,7 +81,9 @@ fn infer_table_tuple_or_array(
         }
     }
 
-    Ok(LuaType::Tuple(LuaTupleType::new(types).into()))
+    Ok(LuaType::Tuple(
+        LuaTupleType::new(types, LuaTupleStatus::InferResolve).into(),
+    ))
 }
 
 fn flatten_multi_into_tuple(tuple_list: &mut Vec<LuaType>, multi: &VariadicType) {
@@ -226,8 +230,17 @@ fn infer_table_field_type_by_parent(
 ) -> InferResult {
     let member_id = LuaMemberId::new(field.get_syntax_id(), cache.get_file_id());
     if let Some(type_cache) = db.get_type_index().get_type_cache(&member_id.into()) {
-        match type_cache.as_type() {
+        let typ = type_cache.as_type();
+        match typ {
             LuaType::TableConst(_) => {}
+            LuaType::Tuple(tuple) => {
+                let types = tuple.get_types();
+                // 这种情况下缓存的类型可能是不精确的
+                if tuple.is_infer_resolve() && types.len() == 1 && types[0].is_unknown() {
+                } else {
+                    return Ok(typ.clone());
+                }
+            }
             typ => return Ok(typ.clone()),
         }
     } else {

@@ -10,8 +10,8 @@ use super::{
     },
     InferFailReason, InferResult,
 };
-use crate::semantic::generic::instantiate_doc_function;
 use crate::semantic::infer_expr;
+use crate::{semantic::generic::instantiate_doc_function, LuaVarRefId};
 use crate::{
     CacheEntry, CacheKey, DbIndex, InFiled, LuaFunctionType, LuaGenericType, LuaInstanceType,
     LuaOperatorMetaMethod, LuaOperatorOwner, LuaSignatureId, LuaType, LuaTypeDeclId, LuaUnionType,
@@ -252,7 +252,7 @@ fn infer_type_doc_function(
         let operator = operator_index
             .get_operator(overload_id)
             .ok_or(InferFailReason::None)?;
-        let func = operator.get_operator_func();
+        let func = operator.get_operator_func(db);
         match func {
             LuaType::DocFunction(f) => {
                 if f.contain_self() {
@@ -326,7 +326,7 @@ fn infer_generic_type_doc_function(
         let operator = operator_index
             .get_operator(overload_id)
             .ok_or(InferFailReason::None)?;
-        let func = operator.get_operator_func();
+        let func = operator.get_operator_func(db);
         match func {
             LuaType::DocFunction(_) => {
                 let new_f = instantiate_type_generic(db, &func, &substitutor);
@@ -403,7 +403,7 @@ fn infer_table_type_doc_function(db: &DbIndex, table: InFiled<TextRange>) -> Inf
             .get_operator_index()
             .get_operator(operator_id)
             .ok_or(InferFailReason::None)?;
-        let func = operator.get_operator_func();
+        let func = operator.get_operator_func(db);
         match func {
             LuaType::DocFunction(func) => {
                 return Ok(func.into());
@@ -625,17 +625,28 @@ pub fn infer_call_expr(
 
     let prefix_expr = call_expr.get_prefix_expr().ok_or(InferFailReason::None)?;
     let prefix_type = infer_expr(db, cache, prefix_expr)?;
-
-    Ok(infer_call_expr_func(
+    let mut ret_type = infer_call_expr_func(
         db,
         cache,
-        call_expr,
+        call_expr.clone(),
         prefix_type,
         &mut InferGuard::new(),
         None,
     )?
     .get_ret()
-    .clone())
+    .clone();
+
+    let file_id = cache.get_file_id();
+    let var_ref_id = LuaVarRefId::SyntaxId(InFiled::new(file_id, call_expr.get_syntax_id()));
+    let flow_chain = db.get_flow_index().get_flow_chain(file_id, var_ref_id);
+    if let Some(flow_chain) = flow_chain {
+        let root = call_expr.get_root();
+        for type_assert in flow_chain.get_all_type_asserts() {
+            ret_type = type_assert.tighten_type(db, cache, &root, ret_type)?;
+        }
+    }
+
+    Ok(ret_type)
 }
 
 fn check_can_infer(

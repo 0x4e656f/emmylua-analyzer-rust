@@ -424,11 +424,18 @@ impl LuaType {
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct LuaTupleType {
     types: Vec<LuaType>,
+    pub status: LuaTupleStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LuaTupleStatus {
+    DocResolve,
+    InferResolve,
 }
 
 impl LuaTupleType {
-    pub fn new(types: Vec<LuaType>) -> Self {
-        Self { types }
+    pub fn new(types: Vec<LuaType>, status: LuaTupleStatus) -> Self {
+        Self { types, status }
     }
 
     pub fn get_types(&self) -> &[LuaType] {
@@ -467,6 +474,10 @@ impl LuaTupleType {
         }
 
         ty
+    }
+
+    pub fn is_infer_resolve(&self) -> bool {
+        matches!(self.status, LuaTupleStatus::InferResolve)
     }
 }
 
@@ -550,7 +561,19 @@ impl LuaFunctionType {
                         return true;
                     }
                     match owner_type {
-                        Some(owner_type) => semantic_model.type_check(owner_type, t).is_ok(),
+                        Some(owner_type) => {
+                            // 一些类型不应该被视为 method
+                            match (owner_type, t) {
+                                (LuaType::Ref(_) | LuaType::Def(_), _) => {
+                                    if t.is_any() || t.is_table() || t.is_class_tpl() {
+                                        return false;
+                                    }
+                                }
+                                _ => {}
+                            }
+
+                            semantic_model.type_check(owner_type, t).is_ok()
+                        }
                         None => name == "self",
                     }
                 }
@@ -923,6 +946,7 @@ impl VariadicType {
         }
     }
 
+    /// 获取可变参数的最小长度, 如果可变参数是无限长度, 则返回 None
     pub fn get_min_len(&self) -> Option<usize> {
         match self {
             VariadicType::Base(_) => None,
@@ -944,6 +968,7 @@ impl VariadicType {
         }
     }
 
+    /// 获取可变参数的最大长度, 如果可变参数是无限长度, 则返回 None
     pub fn get_max_len(&self) -> Option<usize> {
         match self {
             VariadicType::Base(_) => None,

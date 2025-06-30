@@ -1,6 +1,6 @@
 [package]
 name = "emmylua_check"
-version = "0.8.0"
+version = "0.8.2"
 edition = "2021"
 authors = ["CppCXY"]
 description = "A command-line tool for checking lua code."
@@ -25,5 +25,5 @@ rowan.workspace = true
 walkdir.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
-ariadne.workspace = true
 clap.workspace = true
+atty.workspace = true

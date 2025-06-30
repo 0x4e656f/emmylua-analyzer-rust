@@ -12,6 +12,7 @@ use std::collections::{HashMap, HashSet};
 pub use type_decl::{
     LuaDeclLocation, LuaDeclTypeKind, LuaTypeAttribute, LuaTypeDecl, LuaTypeDeclId,
 };
+pub use type_ops::get_real_type;
 pub use type_ops::TypeOps;
 pub use type_owner::{LuaTypeCache, LuaTypeOwner};
 pub use types::*;
@@ -189,12 +190,30 @@ impl LuaTypeIndex {
         }
     }
 
+    pub fn get_super_types_iter(
+        &self,
+        decl_id: &LuaTypeDeclId,
+    ) -> Option<impl Iterator<Item = &LuaType> + '_> {
+        self.supers
+            .get(decl_id)
+            .map(|supers| supers.iter().map(|s| &s.value))
+    }
+
     pub fn get_type_decl(&self, decl_id: &LuaTypeDeclId) -> Option<&LuaTypeDecl> {
         self.full_name_type_map.get(decl_id)
     }
 
     pub fn get_all_types(&self) -> Vec<&LuaTypeDecl> {
         self.full_name_type_map.values().collect()
+    }
+
+    pub fn get_file_namespaces(&self) -> Vec<String> {
+        self.file_namespace
+            .values()
+            .cloned()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect()
     }
 
     pub fn get_type_decl_mut(&mut self, decl_id: &LuaTypeDeclId) -> Option<&mut LuaTypeDecl> {
