@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::{DiagnosticCode, VirtualWorkspace};
+    use crate::{DiagnosticCode, LuaType, LuaUnionType, VirtualWorkspace};
 
     #[test]
     fn test_issue_231() {
@@ -33,7 +33,7 @@ mod tests {
                 ---@type int
                 local index
 
-                local points = Pos[cur] 
+                local points = Pos[cur]
                 ---@cast points -?
                 local point = points[index] ---@cast point -?
                 A = point[1]
@@ -41,6 +41,26 @@ mod tests {
             "#,
         );
         let ty = ws.expr_ty("A");
-        assert_eq!(ws.humanize_type(ty), "(36|826)");
+        let expected_ty = LuaType::Union(
+            LuaUnionType::from_vec(vec![LuaType::IntegerConst(36), LuaType::IntegerConst(826)])
+                .into(),
+        );
+        assert_eq!(ty, expected_ty);
+    }
+
+    #[test]
+    fn test_issue_595() {
+        let mut ws = VirtualWorkspace::new();
+        ws.check_code_for(
+            DiagnosticCode::AssignTypeMismatch,
+            r#"
+                local ret           --- @type [integer?]
+                local h = ret[#ret] -- type is integer??
+                if h then
+                    --- @type integer
+                    local _ = h
+                end
+            "#,
+        );
     }
 }

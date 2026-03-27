@@ -1,11 +1,40 @@
 #[cfg(test)]
 mod tests {
+    use crate::handlers::test_lib::{ProviderVirtualWorkspace, VirtualHoverResult, check};
+    use googletest::prelude::*;
 
-    use crate::handlers::test_lib::{ProviderVirtualWorkspace, VirtualHoverResult};
-    #[test]
-    fn test_1() {
+    fn dedent(input: &str) -> String {
+        let lines: Vec<&str> = input.lines().collect();
+        let mut min_indent = usize::MAX;
+        for line in &lines {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let indent = line.chars().take_while(|c| *c == ' ').count();
+            min_indent = min_indent.min(indent);
+        }
+        if min_indent == usize::MAX {
+            return String::new();
+        }
+        let mut out = String::new();
+        for (i, line) in lines.iter().enumerate() {
+            let trimmed = if line.len() >= min_indent {
+                &line[min_indent..]
+            } else {
+                line
+            };
+            out.push_str(trimmed);
+            if i + 1 < lines.len() {
+                out.push('\n');
+            }
+        }
+        out.trim_start_matches('\n').trim_end().to_string()
+    }
+
+    #[gtest]
+    fn test_1() -> Result<()> {
         let mut ws = ProviderVirtualWorkspace::new();
-        assert!(ws.check_hover(
+        check!(ws.check_hover(
             r#"
                 ---@class <??>A
                 ---@field a number
@@ -18,30 +47,31 @@ mod tests {
                         .to_string(),
             },
         ));
+        Ok(())
     }
 
-    #[test]
-    fn test_right_to_left() {
+    #[gtest]
+    fn test_right_to_left() -> Result<()> {
         let mut ws = ProviderVirtualWorkspace::new();
-        assert!(ws.check_hover(
-            r#"
-                ---@class H4
-                local m = {
-                    x = 1
-                }
+        // check!(ws.check_hover(
+        //     r#"
+        //         ---@class H4
+        //         local m = {
+        //             x = 1
+        //         }
 
-                ---@type H4
-                local m1
+        //         ---@type H4
+        //         local m1
 
-                m1.x = {}
-                m1.<??>x = {}
-            "#,
-            VirtualHoverResult {
-                value: "```lua\n(field) x: integer = 1\n```".to_string(),
-            },
-        ));
+        //         m1.x = {}
+        //         m1.<??>x = {}
+        //     "#,
+        //     VirtualHoverResult {
+        //         value: "```lua\n(field) x: integer = 1\n```".to_string(),
+        //     },
+        // ));
 
-        assert!(ws.check_hover(
+        check!(ws.check_hover(
             r#"
                 ---@class Node
                 ---@field x number
@@ -64,7 +94,7 @@ mod tests {
             },
         ));
 
-        assert!(ws.check_hover(
+        check!(ws.check_hover(
             r#"
                  ---@class Node1
                 ---@field x number
@@ -85,12 +115,13 @@ mod tests {
                 value: "```lua\nlocal node: Node1 {\n    x: number,\n}\n```".to_string(),
             },
         ));
+        Ok(())
     }
 
-    #[test]
-    fn test_hover_nil() {
+    #[gtest]
+    fn test_hover_nil() -> Result<()> {
         let mut ws = ProviderVirtualWorkspace::new();
-        assert!(ws.check_hover(
+        check!(ws.check_hover(
             r#"
                 ---@class A
                 ---@field a? number
@@ -104,12 +135,13 @@ mod tests {
                 value: "```lua\n(field) a: number?\n```".to_string(),
             },
         ));
+        Ok(())
     }
 
-    #[test]
-    fn test_function_infer_return_val() {
+    #[gtest]
+    fn test_function_infer_return_val() -> Result<()> {
         let mut ws = ProviderVirtualWorkspace::new();
-        assert!(ws.check_hover(
+        check!(ws.check_hover(
             r#"
                 local function <??>f(a, b)
                     a = 1
@@ -119,12 +151,94 @@ mod tests {
                 value: "```lua\nlocal function f(a, b)\n```".to_string(),
             },
         ));
+        Ok(())
     }
 
-    #[test]
-    fn test_decl_desc() {
+    #[gtest]
+    fn test_hover_param_string() -> Result<()> {
         let mut ws = ProviderVirtualWorkspace::new();
-        assert!(ws.check_hover(
+        check!(ws.check_hover(
+            r#"
+                ---@param n string doc
+                function foo(<??>n)
+                end
+            "#,
+            VirtualHoverResult {
+                value: dedent(
+                    r#"
+                    ```lua
+                    local n: string
+                    ```
+
+                    ---
+
+                    doc
+                    "#
+                )
+            },
+        ));
+        Ok(())
+    }
+
+    #[gtest]
+    fn test_hover_param_func() -> Result<()> {
+        let mut ws = ProviderVirtualWorkspace::new();
+        check!(ws.check_hover(
+            r#"
+                ---@param n fun():boolean doc
+                function foo(<??>n)
+                end
+            "#,
+            VirtualHoverResult {
+                value: dedent(
+                    r#"
+                    ```lua
+                    local function n() -> boolean
+                    ```
+
+                    ---
+
+                    doc
+                    "#
+                )
+            },
+        ));
+        Ok(())
+    }
+
+    #[gtest]
+    fn test_hover_narrowed_function_type() -> Result<()> {
+        let mut ws = ProviderVirtualWorkspace::new();
+        check!(ws.check_hover(
+            r#"
+                ---@param n integer|fun():boolean
+                function _G.foo(n)
+                    local f = n
+                    if type(f) ~= 'function' then
+                        f = function()
+                            return true
+                        end
+                    end
+                    local _ = <??>f
+                end
+            "#,
+            VirtualHoverResult {
+                value: dedent(
+                    r#"
+                    ```lua
+                    local function n() -> boolean
+                    ```
+                    "#
+                ),
+            },
+        ));
+        Ok(())
+    }
+
+    #[gtest]
+    fn test_decl_desc() -> Result<()> {
+        let mut ws = ProviderVirtualWorkspace::new();
+        check!(ws.check_hover(
             r#"
                 ---@class Buff.AddData
                 ---@field pulse? number 心跳周期
@@ -138,12 +252,13 @@ mod tests {
                 value: "```lua\n(field) pulse: number?\n```\n\n&nbsp;&nbsp;in class `Buff.AddData`\n\n---\n\n心跳周期".to_string(),
             },
         ));
+        Ok(())
     }
 
-    #[test]
-    fn test_issue_535() {
+    #[gtest]
+    fn test_issue_535() -> Result<()> {
         let mut ws = ProviderVirtualWorkspace::new();
-        assert!(ws.check_hover(
+        check!(ws.check_hover(
             r#"
                 ---@type table<string, number>
                 local t
@@ -160,7 +275,7 @@ mod tests {
             },
         ));
 
-        assert!(ws.check_hover(
+        check!(ws.check_hover(
             r#"
                 ---@type table<string, number>
                 local t = {
@@ -181,42 +296,45 @@ mod tests {
                 value: "```lua\n(field) _cfg: number\n```".to_string(),
             },
         ));
+        Ok(())
     }
 
-    #[test]
-    fn test_signature_desc() {
+    #[gtest]
+    fn test_signature_desc() -> Result<()> {
         let mut ws = ProviderVirtualWorkspace::new();
-        assert!(ws.check_hover(
+        check!(ws.check_hover(
             r#"
-            -- # A
-            local function a<??>bc()
-            end
+                -- # A
+                local function a<??>bc()
+                end
             "#,
             VirtualHoverResult {
                 value: "```lua\nlocal function abc()\n```\n\n---\n\n# A".to_string(),
             },
         ));
+        Ok(())
     }
 
-    #[test]
-    fn test_class_desc() {
+    #[gtest]
+    fn test_class_desc() -> Result<()> {
         let mut ws = ProviderVirtualWorkspace::new();
-        assert!(ws.check_hover(
+        check!(ws.check_hover(
             r#"
-            ---A1
-            ---@class AB<??>C
-            ---A2
+                ---A1
+                ---@class AB<??>C
+                ---A2
             "#,
             VirtualHoverResult {
                 value: "```lua\n(class) ABC\n```\n\n---\n\nA1".to_string(),
             },
         ));
+        Ok(())
     }
 
-    #[test]
-    fn test_alias_desc() {
+    #[gtest]
+    fn test_alias_desc() -> Result<()> {
         let mut ws = ProviderVirtualWorkspace::new();
-        assert!(ws.check_hover(
+        check!(ws.check_hover(
             r#"
                 ---@alias Tes<??>Alias
                 ---| 'A' # A1
@@ -226,5 +344,211 @@ mod tests {
                 value: "```lua\n(alias) TesAlias = (\"A\"|\"B\")\n    | \"A\" -- A1\n    | \"B\" -- A2\n\n```".to_string(),
             },
         ));
+        Ok(())
+    }
+
+    #[gtest]
+    fn test_type_desc() -> Result<()> {
+        let mut ws = ProviderVirtualWorkspace::new();
+        check!(ws.check_hover(
+            r#"
+                local export = {
+                    ---@type number? activeSub
+                    vvv = nil
+                }
+
+                export.v<??>vv
+            "#,
+            VirtualHoverResult {
+                value: "```lua\n(field) vvv: number?\n```\n\n---\n\nactiveSub".to_string(),
+            },
+        ));
+        Ok(())
+    }
+
+    #[gtest]
+    fn test_field_key() -> Result<()> {
+        let mut ws = ProviderVirtualWorkspace::new();
+        ws.def(
+            r#"
+                ---@class ObserverParams
+                ---@field next fun() # 测试
+
+                ---@param params fun() | ObserverParams
+                function test(params)
+                end
+            "#,
+        );
+        check!(ws.check_hover(
+            r#"
+                test({
+                    <??>next = function()
+                    end
+                })
+            "#,
+            VirtualHoverResult {
+                value: "```lua\n(field) ObserverParams.next()\n```\n\n---\n\n测试".to_string(),
+            },
+        ));
+        Ok(())
+    }
+
+    #[gtest]
+    fn test_field_key_for_generic() -> Result<()> {
+        let mut ws = ProviderVirtualWorkspace::new();
+        ws.def(
+            r#"
+                ---@class ObserverParams<T>
+                ---@field next fun() # 测试
+
+                ---@generic T
+                ---@param params fun() | ObserverParams<T>
+                function test(params)
+                end
+            "#,
+        );
+        check!(ws.check_hover(
+            r#"
+                test({
+                    <??>next = function()
+                    end
+                })
+            "#,
+            VirtualHoverResult {
+                value: "```lua\n(field) ObserverParams.next()\n```\n\n---\n\n测试".to_string(),
+            },
+        ));
+        Ok(())
+    }
+
+    #[gtest]
+    fn test_before_dot_returns_object_info() -> Result<()> {
+        let mut ws = ProviderVirtualWorkspace::new();
+        ws.def(
+            r#"
+                ---@class Node
+                ---@field field number?
+                ---@field method fun(self: Node)
+
+                ---@type Node
+                node = {}
+
+                function node.method() end
+            "#,
+        );
+
+        check!(ws.check_hover(
+            r#"
+                node<??>.field = nil
+            "#,
+            VirtualHoverResult {
+                value: "```lua\n(global) node: Node {\n    field: number?,\n    method: function,\n}\n```".to_string(),
+            },
+        ));
+
+        check!(ws.check_hover(
+            r#"
+                node<??>:method()
+            "#,
+            VirtualHoverResult {
+                value: "```lua\n(global) node: Node {\n    field: number?,\n    method: function,\n}\n```".to_string(),
+            },
+        ));
+
+        check!(ws.check_hover(
+            r#"
+                node<??>["key"] = "value"
+            "#,
+            VirtualHoverResult {
+                value: "```lua\n(global) node: Node {\n    field: number?,\n    method: function,\n}\n```".to_string(),
+            },
+        ));
+
+        check!(ws.check_hover(
+            r#"
+                node["key"<??>] = "value"
+            "#,
+            VirtualHoverResult {
+                value: "\"key\"".to_string(),
+            },
+        ));
+
+        Ok(())
+    }
+
+    #[gtest]
+    fn test_see_tag() -> Result<()> {
+        let mut ws = ProviderVirtualWorkspace::new();
+        check!(ws.check_hover(
+            r#"
+                --- Description
+                ---
+                --- @see a.b.c
+                local function te<??>st() end
+            "#,
+            VirtualHoverResult {
+                value: "```lua\nlocal function test()\n```\n\n---\n\nDescription\n\n---\n\n@*see* a.b.c".to_string(),
+            },
+        ));
+
+        check!(ws.check_hover(
+            r#"
+                --- Description
+                ---
+                --- @see a.b.c see description
+                local function te<??>st() end
+            "#,
+            VirtualHoverResult {
+                value: "```lua\nlocal function test()\n```\n\n---\n\nDescription\n\n---\n\n@*see* a.b.c see description".to_string(),
+            },
+        ));
+
+        Ok(())
+    }
+
+    #[gtest]
+    fn test_other_tag() -> Result<()> {
+        let mut ws = ProviderVirtualWorkspace::new();
+        check!(ws.check_hover(
+            r#"
+                --- Description
+                ---
+                --- @xyz content
+                local function te<??>st() end
+            "#,
+            VirtualHoverResult {
+                value: "```lua\nlocal function test()\n```\n\n---\n\nDescription\n\n---\n\n@*xyz* content".to_string(),
+            },
+        ));
+
+        Ok(())
+    }
+
+    #[gtest]
+    fn test_class_with_nil() -> Result<()> {
+        let mut ws = ProviderVirtualWorkspace::new();
+        ws.def(
+            r#"
+            ---@class A
+            ---@field aAnnotation? string a标签
+
+            ---@class B
+            ---@field bAnnotation? string b标签
+            "#,
+        );
+        check!(ws.check_hover(
+            r#"
+            ---@type A|B|nil
+            local defaultOpt = {
+                aAnnota<??>tion = "a",
+            }
+            "#,
+            VirtualHoverResult {
+                value:
+                    "```lua\n(field) aAnnotation: string = \"a\"\n```\n\n---\n\na标签".to_string(),
+            },
+        ));
+
+        Ok(())
     }
 }

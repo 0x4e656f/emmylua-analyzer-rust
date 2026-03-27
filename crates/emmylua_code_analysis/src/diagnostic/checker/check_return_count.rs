@@ -5,7 +5,7 @@ use emmylua_parser::{
 
 use crate::{DiagnosticCode, LuaSignatureId, LuaType, SemanticModel, SignatureReturnStatus};
 
-use super::{get_return_stats, Checker, DiagnosticContext};
+use super::{Checker, DiagnosticContext, get_return_stats};
 
 pub struct CheckReturnCount;
 
@@ -49,7 +49,7 @@ fn get_function_return_info(
         _ => {}
     };
 
-    let signature_id = LuaSignatureId::from_closure(semantic_model.get_file_id(), &closure_expr);
+    let signature_id = LuaSignatureId::from_closure(semantic_model.get_file_id(), closure_expr);
     let signature = context.db.get_signature_index().get(&signature_id)?;
 
     Some((
@@ -152,10 +152,10 @@ fn check_return_block(
 
     // 检查是否 error() 了
     for call_expr_stat in block.children::<LuaCallExprStat>() {
-        if let Some(call_expr) = call_expr_stat.get_call_expr() {
-            if call_expr.is_error() {
-                return Ok(());
-            }
+        if let Some(call_expr) = call_expr_stat.get_call_expr()
+            && call_expr.is_error()
+        {
+            return Ok(());
         }
     }
 
@@ -163,11 +163,7 @@ fn check_return_block(
     let has_return = check_if_stat(context, semantic_model, &block)?
         | check_while_stat(context, semantic_model, &block)?;
 
-    if has_return {
-        Ok(())
-    } else {
-        Err(block)
-    }
+    if has_return { Ok(()) } else { Err(block) }
 }
 
 fn check_if_stat(
@@ -198,9 +194,7 @@ fn check_if_stat(
         }
 
         // 检查是否存在`else`分支, 如果存在则上面已经检查过
-        if !has_return && if_stat.get_else_clause().is_none() {
-            has_return = false;
-        } else {
+        if if_stat.get_else_clause().is_some() {
             has_return = true;
         }
     }
@@ -270,11 +264,12 @@ fn check_return_count(
     };
 
     // 计算实际返回的表达式数量并记录多余的范围
-    let expr_list = return_stat.get_expr_list();
+    let expr_list = return_stat.get_expr_list().collect::<Vec<_>>();
     let mut total_return_count = 0;
+    let mut tail_return_nil = false;
     let mut redundant_ranges = Vec::new();
 
-    for expr in expr_list {
+    for (index, expr) in expr_list.iter().enumerate() {
         let expr_type = semantic_model
             .infer_expr(expr.clone())
             .unwrap_or(LuaType::Unknown);
@@ -282,10 +277,19 @@ fn check_return_count(
             LuaType::Variadic(variadic) => {
                 total_return_count += variadic.get_max_len()?;
             }
+            LuaType::Nil => {
+                if index == expr_list.len() - 1 {
+                    tail_return_nil = true;
+                }
+                total_return_count += 1;
+            }
             _ => total_return_count += 1,
         };
 
         if max_expected_return_count.is_some() && total_return_count > max_expected_return_count? {
+            if tail_return_nil && total_return_count - 1 == max_expected_return_count? {
+                continue;
+            }
             redundant_ranges.push(expr.get_range());
         }
     }

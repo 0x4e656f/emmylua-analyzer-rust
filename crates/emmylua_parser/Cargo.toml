@@ -1,7 +1,7 @@
 [package]
 name = "emmylua_parser"
-version = "0.11.0"
-edition = "2021"
+version = "0.24.0"
+edition = "2024"
 authors = ["CppCXY"]
 description = "A parser for EmmyLua and luals"
 license = "MIT"
@@ -10,11 +10,15 @@ readme = "README.md"
 keywords = ["emmylua", "luals", "parser", "lua"]
 categories = ["development-tools", "parsing"]
 
+# Inherit workspace lints configuration
+[lints]
+workspace = true
+
 [dependencies]
 rowan.workspace = true
 rust-i18n.workspace = true
 serde.workspace = true
 
 [package.metadata.i18n]
-available-locales = ["en", "zh_CN", "zh_HK", "zh_TW"]
+available-locales = ["en", "zh_CN", "zh_HK"]
 default-locale = "en"

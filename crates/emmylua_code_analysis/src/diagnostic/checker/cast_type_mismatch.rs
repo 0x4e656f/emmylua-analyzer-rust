@@ -1,15 +1,13 @@
 use emmylua_parser::{LuaAst, LuaAstNode, LuaDocTagCast};
-use itertools::Itertools;
 use rowan::TextRange;
 use std::collections::HashSet;
 
-use crate::diagnostic::checker::generic::infer_doc_type::infer_doc_type;
 use crate::{
-    get_real_type, DbIndex, DiagnosticCode, LuaType, LuaUnionType, SemanticModel,
-    TypeCheckFailReason, TypeCheckResult,
+    DbIndex, DiagnosticCode, DocTypeInferContext, LuaType, LuaUnionType, SemanticModel,
+    TypeCheckFailReason, TypeCheckResult, get_real_type, infer_doc_type,
 };
 
-use super::{humanize_lint_type, Checker, DiagnosticContext};
+use super::{Checker, DiagnosticContext, humanize_lint_type};
 
 pub struct CastTypeMismatchChecker;
 
@@ -17,7 +15,6 @@ impl Checker for CastTypeMismatchChecker {
     const CODES: &[DiagnosticCode] = &[DiagnosticCode::CastTypeMismatch];
 
     fn check(context: &mut DiagnosticContext, semantic_model: &SemanticModel) {
-        // dbg!(&semantic_model.get_root());
         for node in semantic_model.get_root().descendants::<LuaAst>() {
             if let LuaAst::LuaDocTagCast(cast_tag) = node {
                 check_cast_tag(context, semantic_model, &cast_tag);
@@ -37,15 +34,17 @@ fn check_cast_tag(
         expand_type(semantic_model.get_db(), &typ).unwrap_or(typ)
     };
 
+    let doc_ctx = DocTypeInferContext::new(semantic_model.get_db(), semantic_model.get_file_id());
+
     // 检查每个 cast 操作类型
     for op_type in cast_tag.get_op_types() {
         // 如果具有操作符, 则不检查
-        if let Some(_) = op_type.get_op() {
+        if op_type.get_op().is_some() {
             continue;
         }
         if let Some(target_doc_type) = op_type.get_type() {
             let target_type = {
-                let typ = infer_doc_type(semantic_model, &target_doc_type);
+                let typ = infer_doc_type(doc_ctx, &target_doc_type);
                 expand_type(semantic_model.get_db(), &typ).unwrap_or(typ)
             };
             check_cast_compatibility(
@@ -72,15 +71,15 @@ fn check_cast_compatibility(
         return Some(());
     }
 
-    // 检查是否可以从原始类型转换为目标类型
+    // 检查是否可以从原始类型转换为目标类型, 允许父类转为子类
     let result = match origin_type {
         LuaType::Union(union_type) => {
-            for member_type in union_type.get_types() {
+            for member_type in union_type.into_vec() {
                 // 不检查 nil 类型
                 if member_type.is_nil() {
                     continue;
                 }
-                if cast_type_check(semantic_model, member_type, target_type, 0).is_ok() {
+                if cast_type_check(semantic_model, &member_type, target_type, 0).is_ok() {
                     return Some(());
                 }
             }
@@ -89,7 +88,7 @@ fn check_cast_compatibility(
         _ => cast_type_check(semantic_model, origin_type, target_type, 0),
     };
 
-    if !result.is_ok() {
+    if result.is_err() {
         add_cast_type_mismatch_diagnostic(
             context,
             semantic_model,
@@ -113,7 +112,7 @@ fn add_cast_type_mismatch_diagnostic(
 ) {
     let db = semantic_model.get_db();
     match result {
-        Ok(_) => return,
+        Ok(_) => (),
         Err(reason) => {
             let reason_message = match reason {
                 TypeCheckFailReason::TypeNotMatchWithReason(reason) => reason,
@@ -139,6 +138,7 @@ fn add_cast_type_mismatch_diagnostic(
     }
 }
 
+/// 允许父类转为子类
 fn cast_type_check(
     semantic_model: &SemanticModel,
     origin_type: &LuaType,
@@ -165,11 +165,11 @@ fn cast_type_check(
         }
         (_, LuaType::Union(union)) => {
             // 通常来说这个的原始类型为 alias / enum-field 的集合
-            for member_type in union.get_types() {
+            for member_type in union.into_vec() {
                 match cast_type_check(
                     semantic_model,
                     origin_type,
-                    member_type,
+                    &member_type,
                     recursion_depth + 1,
                 ) {
                     Ok(_) => {}
@@ -178,11 +178,14 @@ fn cast_type_check(
                     }
                 }
             }
-            return Ok(());
+            Ok(())
         }
         _ => {
             if origin_type.is_table() {
-                if target_type.is_table() || target_type.is_custom_type() {
+                if target_type.is_table()
+                    || target_type.is_custom_type()
+                    || target_type.is_generic()
+                {
                     return Ok(());
                 }
             } else if origin_type.is_custom_type() {
@@ -193,13 +196,16 @@ fn cast_type_check(
                 if target_type.is_string() {
                     return Ok(());
                 }
-            } else if origin_type.is_number() {
-                if target_type.is_number() {
-                    return Ok(());
-                }
+            } else if origin_type.is_number() && target_type.is_number() {
+                return Ok(());
             }
-
-            semantic_model.type_check(target_type, origin_type)
+            match semantic_model.type_check_detail(target_type, origin_type) {
+                Ok(_) => Ok(()),
+                Err(_) => match semantic_model.type_check_detail(origin_type, target_type) {
+                    Ok(_) => Ok(()),
+                    Err(reason) => Err(reason),
+                },
+            }
         }
     }
 }
@@ -222,13 +228,13 @@ fn expand_type_recursive(
     visited.insert(typ.clone());
 
     // 展开类型, 如果具有多种类型将尽量返回 union
-    match get_real_type(db, &typ).unwrap_or(&typ) {
+    match get_real_type(db, typ).unwrap_or(typ) {
         LuaType::Ref(id) | LuaType::Def(id) => {
             let type_decl = db.get_type_index().get_type_decl(id)?;
-            if type_decl.is_enum() {
-                if let Some(typ) = type_decl.get_enum_field_type(db) {
-                    return expand_type_recursive(db, &typ, visited);
-                }
+            if type_decl.is_enum()
+                && let Some(typ) = type_decl.get_enum_field_type(db)
+            {
+                return expand_type_recursive(db, &typ, visited);
             };
         }
         LuaType::Instance(inst) => {
@@ -241,28 +247,43 @@ fn expand_type_recursive(
         }
         LuaType::Union(union_type) => {
             // 递归展开 union 中的每个类型
-            let mut expanded_types = Vec::new();
-            for inner_type in union_type.get_types() {
-                if let Some(expanded) = expand_type_recursive(db, inner_type, visited) {
+            let mut expanded_types = HashSet::new();
+            let mut has_nil = false;
+            for inner_type in union_type.into_vec() {
+                if inner_type.is_nil() {
+                    has_nil = true;
+                    continue;
+                }
+                if let Some(expanded) = expand_type_recursive(db, &inner_type, visited) {
                     match expanded {
                         LuaType::Union(inner_union) => {
                             // 如果展开后还是 union，则将其成员类型添加到结果中
-                            expanded_types.extend(inner_union.get_types().iter().cloned());
+                            expanded_types.extend(inner_union.into_vec().iter().cloned());
                         }
                         _ => {
-                            expanded_types.push(expanded);
+                            expanded_types.insert(expanded);
                         }
                     }
                 } else {
-                    expanded_types.push(inner_type.clone());
+                    expanded_types.insert(inner_type.clone());
                 }
             }
 
-            let expanded_types = expanded_types.into_iter().unique().collect::<Vec<_>>();
             return match expanded_types.len() {
-                0 => Some(LuaType::Unknown),
-                1 => Some(expanded_types[0].clone().into()),
-                _ => Some(LuaType::Union(LuaUnionType::new(expanded_types).into())),
+                0 => {
+                    if has_nil {
+                        Some(LuaType::Nil)
+                    } else {
+                        Some(LuaType::Unknown)
+                    }
+                }
+                1 => {
+                    let single = expanded_types.iter().next().cloned()?;
+                    Some(single)
+                }
+                _ => Some(LuaType::Union(
+                    LuaUnionType::from_set(expanded_types).into(),
+                )),
             };
         }
         LuaType::TypeGuard(_) => return Some(LuaType::Boolean),

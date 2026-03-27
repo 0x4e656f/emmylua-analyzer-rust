@@ -1,6 +1,9 @@
 use std::collections::HashSet;
 
-use emmylua_code_analysis::{get_real_type, LuaMemberInfo, LuaMemberKey, LuaType};
+use emmylua_code_analysis::{
+    InferGuard, LuaMemberInfo, LuaMemberKey, LuaType, get_real_type,
+    infer_table_field_value_should_be,
+};
 use emmylua_parser::{LuaAst, LuaAstNode, LuaKind, LuaTableExpr, LuaTableField, LuaTokenKind};
 use lsp_types::{CompletionItem, InsertTextFormat, InsertTextMode};
 use rowan::NodeOrToken;
@@ -9,6 +12,7 @@ use crate::handlers::completion::{
     add_completions::{check_visibility, is_deprecated},
     completion_builder::CompletionBuilder,
     completion_data::CompletionData,
+    providers::function_provider::dispatch_type,
 };
 
 pub fn add_completion(builder: &mut CompletionBuilder) -> Option<()> {
@@ -73,10 +77,10 @@ fn can_add_key_completion(builder: &mut CompletionBuilder) -> bool {
         return false;
     }
 
-    if let Some(NodeOrToken::Node(node)) = builder.trigger_token.prev_sibling_or_token() {
-        if let Some(LuaAst::LuaComment(_)) = LuaAst::cast(node) {
-            return false;
-        }
+    if let Some(NodeOrToken::Node(node)) = builder.trigger_token.prev_sibling_or_token()
+        && let Some(LuaAst::LuaComment(_)) = LuaAst::cast(node)
+    {
+        return false;
     }
     true
 }
@@ -97,7 +101,7 @@ fn add_field_key_completion(
     };
     let typ = member_info.typ;
 
-    let (label, insert_text) = {
+    let (label, insert_text, insert_text_format) = {
         let is_nullable = if typ.is_nullable() { "?" } else { "" };
         if in_env(builder, &name, &typ).is_some() {
             (
@@ -106,7 +110,8 @@ fn add_field_key_completion(
                     name = name,
                     nullable = is_nullable,
                 ),
-                format!("{name} = {name},", name = name,),
+                format!("{name} = ${{1:{name}}},", name = name),
+                Some(InsertTextFormat::SNIPPET),
             )
         } else {
             // 函数类型不补空格, 留空格让用户触发字符补全
@@ -119,6 +124,7 @@ fn add_field_key_completion(
                     space = space
                 ),
                 format!("{name} ={space}", name = name, space = space),
+                None,
             )
         }
     };
@@ -129,15 +135,13 @@ fn add_field_key_completion(
     }
 
     let data = if let Some(id) = &property_owner {
-        CompletionData::from_property_owner_id(builder, id.clone().into(), None)
+        CompletionData::from_property_owner_id(builder, id.clone(), None)
     } else {
         None
     };
-    let deprecated = if let Some(id) = &property_owner {
-        Some(is_deprecated(builder, id.clone()))
-    } else {
-        None
-    };
+    let deprecated = property_owner
+        .as_ref()
+        .map(|id| is_deprecated(builder, id.clone()));
 
     let completion_item = CompletionItem {
         label,
@@ -145,6 +149,7 @@ fn add_field_key_completion(
         data,
         deprecated,
         insert_text: Some(insert_text),
+        insert_text_format,
         ..Default::default()
     };
 
@@ -152,6 +157,7 @@ fn add_field_key_completion(
     Some(())
 }
 
+/// 是否在当前文件的 env 中, 将会排除掉`std`
 fn in_env(builder: &mut CompletionBuilder, target_name: &str, target_type: &LuaType) -> Option<()> {
     let file_id = builder.semantic_model.get_file_id();
     let decl_tree = builder
@@ -164,7 +170,16 @@ fn in_env(builder: &mut CompletionBuilder, target_name: &str, target_type: &LuaT
         .semantic_model
         .get_db()
         .get_global_index()
-        .get_all_global_decl_ids();
+        .get_all_global_decl_ids()
+        .into_iter()
+        .filter(|id| {
+            !builder
+                .semantic_model
+                .get_db()
+                .get_module_index()
+                .is_std(&id.file_id)
+        })
+        .collect();
     let all_env = [local_env, global_env].concat();
 
     for decl_id in all_env.iter() {
@@ -172,7 +187,7 @@ fn in_env(builder: &mut CompletionBuilder, target_name: &str, target_type: &LuaT
             .semantic_model
             .get_db()
             .get_decl_index()
-            .get_decl(&decl_id)?;
+            .get_decl(decl_id)?;
         let (name, typ) = {
             (
                 decl.get_name().to_string(),
@@ -180,18 +195,13 @@ fn in_env(builder: &mut CompletionBuilder, target_name: &str, target_type: &LuaT
                     .semantic_model
                     .get_db()
                     .get_type_index()
-                    .get_type_cache(&decl_id.clone().into())
+                    .get_type_cache(&(*decl_id).into())
                     .map(|cache| cache.as_type().clone())
                     .unwrap_or(LuaType::Unknown),
             )
         };
         // 必须要名称相同 + 类型兼容
-        if name == target_name
-            && builder
-                .semantic_model
-                .type_check(&target_type, &typ)
-                .is_ok()
-        {
+        if name == target_name && builder.semantic_model.type_check(target_type, &typ).is_ok() {
             return Some(());
         }
     }
@@ -203,36 +213,52 @@ fn add_table_field_value_completion(builder: &mut CompletionBuilder) -> Option<(
         return None;
     }
     // 仅在 value 为空的时候触发
-    let parent = builder.trigger_token.prev_token()?.parent()?;
-    let node = LuaAst::cast(parent)?;
-    match node {
-        LuaAst::LuaTableField(field) => {
-            let table_expr = field.get_parent::<LuaTableExpr>()?;
-            let table_type = builder
-                .semantic_model
-                .infer_table_should_be(table_expr.clone())?;
-            let key = builder
-                .semantic_model
-                .get_member_key(&field.get_field_key()?)?;
-            let member_infos = builder.semantic_model.get_member_infos(&table_type)?;
-            let member_info = member_infos.iter().find(|m| m.key == key)?;
+    let mut parent = if builder.trigger_token.kind() == LuaTokenKind::TkWhitespace.into() {
+        builder.trigger_token.prev_token()?.parent()?
+    } else {
+        builder.trigger_token.parent()?
+    };
+    for _ in 0..3 {
+        match LuaAst::cast(parent.clone())? {
+            LuaAst::LuaTableField(field) => {
+                if field.is_assign_field() {
+                    let table_expr = field.get_parent::<LuaTableExpr>()?;
+                    let table_type = builder
+                        .semantic_model
+                        .infer_table_should_be(table_expr.clone())?;
+                    let key = builder
+                        .semantic_model
+                        .get_member_key(&field.get_field_key()?)?;
+                    let member_infos = builder.semantic_model.get_member_infos(&table_type)?;
+                    let member_info = member_infos.iter().find(|m| m.key == key)?;
 
-            if add_field_value_completion(builder, member_info.clone()).is_some() {
-                // 如果添加了补全项, 则停止
-                builder.stop_here();
+                    if add_field_value_completion(builder, member_info.clone()).is_some() {
+                        // 如果添加了补全项, 则停止
+                        builder.stop_here();
+                    }
+                } else {
+                    let table_field_should = infer_table_field_value_should_be(
+                        builder.semantic_model.get_db(),
+                        &mut builder.semantic_model.get_cache().borrow_mut(),
+                        field,
+                    )
+                    .ok()?;
+                    dispatch_type(builder, table_field_should, &InferGuard::new())?;
+                }
+                return Some(());
             }
-
-            Some(())
+            _ => parent = parent.parent()?,
         }
-        _ => None,
     }
+
+    Some(())
 }
 
 fn add_field_value_completion(
     builder: &mut CompletionBuilder,
     member_info: LuaMemberInfo,
 ) -> Option<()> {
-    let real_type = get_real_type(&builder.semantic_model.get_db(), &member_info.typ)?;
+    let real_type = get_real_type(builder.semantic_model.get_db(), &member_info.typ)?;
     if real_type.is_function() {
         let label_detail = get_function_detail(builder, real_type);
         let item = CompletionItem {
@@ -252,6 +278,8 @@ fn add_field_value_completion(
         };
 
         return builder.add_completion_item(item);
+    } else {
+        dispatch_type(builder, real_type.clone(), &InferGuard::new())?;
     }
 
     None
@@ -264,7 +292,7 @@ fn get_function_detail(builder: &CompletionBuilder, typ: &LuaType) -> Option<Str
                 .semantic_model
                 .get_db()
                 .get_signature_index()
-                .get(&signature_id)?;
+                .get(signature_id)?;
 
             let params_str = signature
                 .get_type_params()

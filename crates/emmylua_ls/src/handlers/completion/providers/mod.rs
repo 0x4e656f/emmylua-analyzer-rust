@@ -1,9 +1,10 @@
 mod auto_require_provider;
+mod desc_provider;
 mod doc_name_token_provider;
 mod doc_tag_provider;
 mod doc_type_provider;
 mod env_provider;
-mod equality_comparison_provider;
+mod equality_provider;
 mod file_path_provider;
 mod function_provider;
 mod keywords_provider;
@@ -12,18 +13,17 @@ mod module_path_provider;
 mod postfix_provider;
 mod table_field_provider;
 
+use super::completion_builder::CompletionBuilder;
 use emmylua_parser::LuaAstToken;
 use emmylua_parser::LuaStringToken;
 pub use function_provider::get_function_remove_nil;
 use rowan::TextRange;
 
-use super::completion_builder::CompletionBuilder;
-
 pub fn add_completions(builder: &mut CompletionBuilder) -> Option<()> {
     postfix_provider::add_completion(builder);
     // `function_provider`优先级必须高于`env_provider`
     function_provider::add_completion(builder);
-    equality_comparison_provider::add_completion(builder);
+    equality_provider::add_completion(builder);
     // 如果`table_field_provider`执行成功会中止补全, 同时优先级必须高于`env_provider`
     table_field_provider::add_completion(builder);
     env_provider::add_completion(builder);
@@ -36,10 +36,11 @@ pub fn add_completions(builder: &mut CompletionBuilder) -> Option<()> {
     doc_tag_provider::add_completion(builder);
     doc_type_provider::add_completion(builder);
     doc_name_token_provider::add_completion(builder);
+    desc_provider::add_completions(builder);
 
     for (index, item) in builder.get_completion_items_mut().iter_mut().enumerate() {
         if item.sort_text.is_none() {
-            item.sort_text = Some(format!("{:04}", index + 1));
+            item.sort_text = Some(format!("{:04}", index + 32));
         }
     }
 
@@ -52,7 +53,7 @@ fn get_text_edit_range_in_string(
 ) -> Option<lsp_types::Range> {
     let text = string_token.get_text();
     let range = string_token.get_range();
-    if text.len() == 0 {
+    if text.is_empty() {
         return None;
     }
 
@@ -67,10 +68,9 @@ fn get_text_edit_range_in_string(
     }
 
     let new_text_range = TextRange::new(start_offset.into(), end_offset.into());
-    let lsp_range = builder
+
+    builder
         .semantic_model
         .get_document()
-        .to_lsp_range(new_text_range);
-
-    lsp_range
+        .to_lsp_range(new_text_range)
 }

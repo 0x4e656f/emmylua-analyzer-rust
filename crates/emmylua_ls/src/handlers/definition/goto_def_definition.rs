@@ -1,8 +1,8 @@
 use std::str::FromStr;
 
 use emmylua_code_analysis::{
-    LuaCompilation, LuaDeclId, LuaMemberId, LuaMemberInfo, LuaMemberKey, LuaSemanticDeclId,
-    LuaType, LuaTypeDeclId, SemanticDeclLevel, SemanticModel,
+    LuaCompilation, LuaDeclId, LuaMemberId, LuaMemberInfo, LuaMemberKey, LuaMemberOwner,
+    LuaSemanticDeclId, LuaType, LuaTypeDeclId, SemanticDeclLevel, SemanticModel,
 };
 use emmylua_parser::{
     LuaAstNode, LuaAstToken, LuaCallExpr, LuaExpr, LuaIndexExpr, LuaReturnStat, LuaStringToken,
@@ -11,143 +11,229 @@ use emmylua_parser::{
 use itertools::Itertools;
 use lsp_types::{GotoDefinitionResponse, Location, Position, Range, Uri};
 
-use crate::handlers::{
-    definition::goto_function::find_call_match_function,
-    hover::{find_all_same_named_members, find_member_origin_owner},
+use crate::{
+    handlers::{
+        definition::goto_function::{
+            find_function_call_origin, find_matching_function_definitions,
+        },
+        hover::{find_all_same_named_members, find_member_origin_owner},
+    },
+    util::{to_camel_case, to_pascal_case, to_snake_case},
 };
 
 pub fn goto_def_definition(
     semantic_model: &SemanticModel,
     compilation: &LuaCompilation,
-    property_owner: LuaSemanticDeclId,
+    semantic_id: LuaSemanticDeclId,
     trigger_token: &LuaSyntaxToken,
 ) -> Option<GotoDefinitionResponse> {
+    // 首先检查属性源位置
     if let Some(property) = semantic_model
         .get_db()
         .get_property_index()
-        .get_property(&property_owner)
+        .get_property(&semantic_id)
+        && let Some(source) = property.source()
+        && let Some(location) = goto_source_location(source)
     {
-        if let Some(source) = &property.source {
-            if let Some(location) = goto_source_location(source) {
-                return Some(GotoDefinitionResponse::Scalar(location));
-            }
-        }
+        return Some(GotoDefinitionResponse::Scalar(location));
     }
-    match property_owner {
-        LuaSemanticDeclId::LuaDecl(decl_id) => {
-            let location = get_decl_location(semantic_model, &decl_id)?;
-            return Some(GotoDefinitionResponse::Scalar(location));
-        }
+
+    // 根据不同的语义声明类型处理
+    match semantic_id {
+        LuaSemanticDeclId::LuaDecl(decl_id) => handle_decl_definition(
+            semantic_model,
+            compilation,
+            trigger_token,
+            &semantic_id,
+            &decl_id,
+        ),
         LuaSemanticDeclId::Member(member_id) => {
-            let same_named_members = find_all_same_named_members(
-                semantic_model,
-                &Some(LuaSemanticDeclId::Member(member_id)),
-            )?;
-
-            let mut locations: Vec<Location> = Vec::new();
-            // 如果是函数调用, 则尝试寻找最匹配的定义
-            if let Some(match_members) =
-                find_call_match_function(semantic_model, trigger_token, &same_named_members)
-            {
-                for member in match_members {
-                    if let LuaSemanticDeclId::Member(member_id) = member {
-                        if let Some(true) = should_trace_member(semantic_model, &member_id) {
-                            // 尝试搜索这个成员最原始的定义
-                            match find_member_origin_owner(compilation, semantic_model, member_id) {
-                                Some(LuaSemanticDeclId::Member(member_id)) => {
-                                    if let Some(location) =
-                                        get_member_location(semantic_model, &member_id)
-                                    {
-                                        locations.push(location);
-                                        continue;
-                                    }
-                                }
-                                Some(LuaSemanticDeclId::LuaDecl(decl_id)) => {
-                                    if let Some(location) =
-                                        get_decl_location(semantic_model, &decl_id)
-                                    {
-                                        locations.push(location);
-                                        continue;
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                        if let Some(location) = get_member_location(semantic_model, &member_id) {
-                            locations.push(location);
-                        }
-                    }
-                }
-                if !locations.is_empty() {
-                    return Some(GotoDefinitionResponse::Array(locations));
-                }
-            }
-
-            // 添加原始成员的位置
-            for member in same_named_members {
-                match member {
-                    LuaSemanticDeclId::Member(member_id) => {
-                        if let Some(location) = get_member_location(semantic_model, &member_id) {
-                            locations.push(location);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-
-            /* 对于实例的处理, 对于实例 obj
-            ```lua
-                ---@class T
-                ---@field func fun(a: int)
-                ---@field func fun(a: string)
-
-                ---@type T
-                local obj = {
-                    func = function() end  -- 点击`func`时需要寻找`T`的定义
-                }
-                obj:func(1) -- 点击`func`时, 不止需要寻找`T`的定义也需要寻找`obj`实例化时赋值的`func`
-            ```
-
-             */
-            if let Some(table_field_infos) =
-                find_instance_table_member(semantic_model, trigger_token, &member_id)
-            {
-                for table_field_info in table_field_infos {
-                    if let Some(LuaSemanticDeclId::Member(table_member_id)) =
-                        table_field_info.property_owner_id
-                    {
-                        if let Some(location) =
-                            get_member_location(semantic_model, &table_member_id)
-                        {
-                            locations.push(location);
-                        }
-                    }
-                }
-            }
-
-            if !locations.is_empty() {
-                return Some(GotoDefinitionResponse::Array(
-                    locations.into_iter().unique().collect(),
-                ));
-            }
+            handle_member_definition(semantic_model, compilation, trigger_token, &member_id)
         }
         LuaSemanticDeclId::TypeDecl(type_decl_id) => {
-            let type_decl = semantic_model
-                .get_db()
-                .get_type_index()
-                .get_type_decl(&type_decl_id)?;
-            let mut locations: Vec<Location> = Vec::new();
-            for lua_location in type_decl.get_locations() {
-                let document = semantic_model.get_document_by_file_id(lua_location.file_id)?;
-                let location = document.to_lsp_location(lua_location.range)?;
-                locations.push(location);
-            }
+            handle_type_decl_definition(semantic_model, &type_decl_id)
+        }
+        _ => None,
+    }
+}
 
+fn handle_decl_definition(
+    semantic_model: &SemanticModel,
+    compilation: &LuaCompilation,
+    trigger_token: &LuaSyntaxToken,
+    property_owner: &LuaSemanticDeclId,
+    decl_id: &LuaDeclId,
+) -> Option<GotoDefinitionResponse> {
+    // 尝试查找函数调用的原始定义
+    if let Some(match_semantic_decl) =
+        find_function_call_origin(semantic_model, compilation, trigger_token, property_owner)
+        && let LuaSemanticDeclId::LuaDecl(matched_decl_id) = match_semantic_decl
+    {
+        if let Some(location) = get_decl_location(semantic_model, &matched_decl_id) {
+            return Some(GotoDefinitionResponse::Scalar(location));
+        }
+    }
+
+    // 返回声明的位置
+    if let Some(location) = get_decl_location(semantic_model, decl_id) {
+        return Some(GotoDefinitionResponse::Scalar(location));
+    }
+
+    // 如果不等于当前文件, 那么我们可能是引用了其他文件的导出
+    if decl_id.file_id != semantic_model.get_file_id()
+        && let Some(semantic_decl) =
+            semantic_model.find_decl(trigger_token.clone().into(), SemanticDeclLevel::NoTrace)
+        && let LuaSemanticDeclId::LuaDecl(decl_id) = semantic_decl
+        && let Some(location) = get_decl_location(semantic_model, &decl_id)
+    {
+        return Some(GotoDefinitionResponse::Scalar(location));
+    }
+
+    None
+}
+
+fn handle_member_definition(
+    semantic_model: &SemanticModel,
+    compilation: &LuaCompilation,
+    trigger_token: &LuaSyntaxToken,
+    member_id: &LuaMemberId,
+) -> Option<GotoDefinitionResponse> {
+    let same_named_members =
+        find_all_same_named_members(semantic_model, &Some(LuaSemanticDeclId::Member(*member_id)))?;
+
+    let mut locations: Vec<Location> = Vec::new();
+
+    // 尝试寻找函数调用时最匹配的定义
+    if let Some(match_members) = find_matching_function_definitions(
+        semantic_model,
+        compilation,
+        trigger_token,
+        &same_named_members,
+    ) {
+        process_matched_members(semantic_model, compilation, &match_members, &mut locations);
+        if !locations.is_empty() {
             return Some(GotoDefinitionResponse::Array(locations));
         }
-        _ => {}
     }
-    None
+
+    // 添加原始成员的位置
+    for member in same_named_members {
+        if let LuaSemanticDeclId::Member(member_id) = member
+            && let Some(location) = get_member_location(semantic_model, &member_id)
+        {
+            // 尝试添加访问器的位置
+            try_set_accessor_locations(semantic_model, &member, &mut locations);
+            locations.push(location);
+        }
+    }
+
+    // 处理实例表成员
+    add_instance_table_member_locations(semantic_model, trigger_token, member_id, &mut locations);
+
+    if !locations.is_empty() {
+        Some(GotoDefinitionResponse::Array(
+            locations.into_iter().unique().collect(),
+        ))
+    } else {
+        None
+    }
+}
+
+fn handle_type_decl_definition(
+    semantic_model: &SemanticModel,
+    type_decl_id: &LuaTypeDeclId,
+) -> Option<GotoDefinitionResponse> {
+    let type_decl = semantic_model
+        .get_db()
+        .get_type_index()
+        .get_type_decl(type_decl_id)?;
+
+    let mut locations: Vec<Location> = Vec::new();
+    for lua_location in type_decl.get_locations() {
+        let document = semantic_model.get_document_by_file_id(lua_location.file_id)?;
+        let location = document.to_lsp_location(lua_location.range)?;
+        locations.push(location);
+    }
+
+    Some(GotoDefinitionResponse::Array(locations))
+}
+
+fn process_matched_members(
+    semantic_model: &SemanticModel,
+    compilation: &LuaCompilation,
+    match_members: &[LuaSemanticDeclId],
+    locations: &mut Vec<Location>,
+) {
+    for member in match_members {
+        match member {
+            LuaSemanticDeclId::Member(member_id) => {
+                if should_trace_member(semantic_model, member_id).unwrap_or(false) {
+                    // 尝试搜索这个成员最原始的定义
+                    match find_member_origin_owner(compilation, semantic_model, *member_id) {
+                        Some(LuaSemanticDeclId::Member(origin_member_id)) => {
+                            if let Some(location) =
+                                get_member_location(semantic_model, &origin_member_id)
+                            {
+                                locations.push(location);
+                                continue;
+                            }
+                        }
+                        Some(LuaSemanticDeclId::LuaDecl(origin_decl_id)) => {
+                            if let Some(location) =
+                                get_decl_location(semantic_model, &origin_decl_id)
+                            {
+                                locations.push(location);
+                                continue;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some(location) = get_member_location(semantic_model, member_id) {
+                    locations.push(location);
+                }
+            }
+            LuaSemanticDeclId::LuaDecl(decl_id) => {
+                if let Some(location) = get_decl_location(semantic_model, decl_id) {
+                    locations.push(location);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn add_instance_table_member_locations(
+    semantic_model: &SemanticModel,
+    trigger_token: &LuaSyntaxToken,
+    member_id: &LuaMemberId,
+    locations: &mut Vec<Location>,
+) {
+    /* 对于实例的处理, 对于实例 obj
+    ```lua
+        ---@class T
+        ---@field func fun(a: int)
+        ---@field func fun(a: string)
+
+        ---@type T
+        local obj = {
+            func = function() end  -- 点击`func`时需要寻找`T`的定义
+        }
+        obj:func(1) -- 点击`func`时, 不止需要寻找`T`的定义也需要寻找`obj`实例化时赋值的`func`
+    ```
+     */
+    if let Some(table_field_infos) =
+        find_instance_table_member(semantic_model, trigger_token, member_id)
+    {
+        for table_field_info in table_field_infos {
+            if let Some(LuaSemanticDeclId::Member(table_member_id)) =
+                table_field_info.property_owner_id
+                && let Some(location) = get_member_location(semantic_model, &table_member_id)
+            {
+                locations.push(location);
+            }
+        }
+    }
 }
 
 fn goto_source_location(source: &str) -> Option<Location> {
@@ -186,15 +272,10 @@ pub fn goto_str_tpl_ref_definition(
     let arg_exprs = call_expr.get_args_list()?.get_args().collect::<Vec<_>>();
     let string_token_idx = arg_exprs.iter().position(|arg| {
         if let LuaExpr::LiteralExpr(literal_expr) = arg {
-            if literal_expr
+            literal_expr
                 .syntax()
                 .text_range()
                 .contains(string_token.get_range().start())
-            {
-                true
-            } else {
-                false
-            }
         } else {
             false
         }
@@ -213,22 +294,24 @@ pub fn goto_str_tpl_ref_definition(
         }
         _ => params.get(string_token_idx),
     }?;
-    if let Some(LuaType::StrTplRef(str_tpl)) = target_param.1.clone() {
-        let prefix = str_tpl.get_prefix();
-        let suffix = str_tpl.get_suffix();
-        let type_decl_id = LuaTypeDeclId::new(format!("{}{}{}", prefix, name, suffix).as_str());
-        let type_decl = semantic_model
-            .get_db()
-            .get_type_index()
-            .get_type_decl(&type_decl_id)?;
-        let mut locations = Vec::new();
-        for lua_location in type_decl.get_locations() {
-            let document = semantic_model.get_document_by_file_id(lua_location.file_id)?;
-            let location = document.to_lsp_location(lua_location.range)?;
-            locations.push(location);
-        }
-
+    // 首先尝试直接匹配StrTplRef类型
+    if let Some(locations) =
+        try_extract_str_tpl_ref_locations(semantic_model, &target_param.1, &name)
+    {
         return Some(GotoDefinitionResponse::Array(locations));
+    }
+
+    // 如果参数类型是union，尝试从中提取StrTplRef类型
+    if let Some(LuaType::Union(union_type)) = target_param.1.clone() {
+        for union_member in union_type.into_vec().iter() {
+            if let Some(locations) = try_extract_str_tpl_ref_locations(
+                semantic_model,
+                &Some(union_member.clone()),
+                &name,
+            ) {
+                return Some(GotoDefinitionResponse::Array(locations));
+            }
+        }
     }
 
     None
@@ -242,7 +325,7 @@ pub fn find_instance_table_member(
     let member_key = semantic_model
         .get_db()
         .get_member_index()
-        .get_member(&member_id)?
+        .get_member(member_id)?
         .get_key();
     let parent = trigger_token.parent()?;
 
@@ -264,14 +347,7 @@ pub fn find_instance_table_member(
             let table_field = LuaTableField::cast(table_field_node)?;
             let table_expr = table_field.get_parent::<LuaTableExpr>()?;
             let typ = semantic_model.infer_table_should_be(table_expr)?;
-            let member_infos = semantic_model.get_member_infos(&typ)?;
-            return Some(
-                member_infos
-                    .iter()
-                    .filter(|m| m.key == *member_key)
-                    .cloned()
-                    .collect(),
-            );
+            return semantic_model.get_member_info_with_key(&typ, member_key.clone(), true);
         }
         _ => {}
     }
@@ -302,14 +378,7 @@ fn find_member_in_table_const(
         .infer_expr(LuaExpr::TableExpr(table_expr))
         .ok()?;
 
-    let member_infos = semantic_model.get_member_infos(&typ)?;
-    Some(
-        member_infos
-            .iter()
-            .filter(|m| m.key == *member_key)
-            .cloned()
-            .collect(),
-    )
+    semantic_model.get_member_info_with_key(&typ, member_key.clone(), true)
 }
 
 /// 是否对 member 启动追踪
@@ -324,6 +393,11 @@ fn should_trace_member(semantic_model: &SemanticModel, member_id: &LuaMemberId) 
     // 如果成员在返回语句中, 则需要追踪
     if LuaReturnStat::can_cast(parent.kind().into()) {
         return Some(true);
+    } else {
+        let typ = semantic_model.get_type((*member_id).into());
+        if typ.is_signature() {
+            return Some(true);
+        }
     }
     None
 }
@@ -337,11 +411,168 @@ fn get_member_location(
 }
 
 fn get_decl_location(semantic_model: &SemanticModel, decl_id: &LuaDeclId) -> Option<Location> {
-    let decl = semantic_model
-        .get_db()
-        .get_decl_index()
-        .get_decl(&decl_id)?;
+    let decl = semantic_model.get_db().get_decl_index().get_decl(decl_id)?;
     let document = semantic_model.get_document_by_file_id(decl_id.file_id)?;
     let location = document.to_lsp_location(decl.get_range())?;
     Some(location)
+}
+
+fn try_extract_str_tpl_ref_locations(
+    semantic_model: &SemanticModel,
+    param_type: &Option<LuaType>,
+    name: &str,
+) -> Option<Vec<Location>> {
+    if let Some(LuaType::StrTplRef(str_tpl)) = param_type {
+        let prefix = str_tpl.get_prefix();
+        let suffix = str_tpl.get_suffix();
+        let type_decl_id = LuaTypeDeclId::global(format!("{}{}{}", prefix, name, suffix).as_str());
+        let type_decl = semantic_model
+            .get_db()
+            .get_type_index()
+            .get_type_decl(&type_decl_id)?;
+        let mut locations = Vec::new();
+        for lua_location in type_decl.get_locations() {
+            let document = semantic_model.get_document_by_file_id(lua_location.file_id)?;
+            let location = document.to_lsp_location(lua_location.range)?;
+            locations.push(location);
+        }
+        return Some(locations);
+    }
+    None
+}
+
+fn try_set_accessor_locations(
+    semantic_model: &SemanticModel,
+    semantic_decl_id: &LuaSemanticDeclId,
+    locations: &mut Vec<Location>,
+) -> Option<()> {
+    #[derive(Clone, Copy)]
+    enum AccessorCaseConvention {
+        CamelCase,  // camelCase
+        SnakeCase,  // snake_case
+        PascalCase, // PascalCase
+    }
+
+    impl AccessorCaseConvention {
+        fn build_name(self, prefix: &str, field_name: &str) -> Option<String> {
+            if field_name.is_empty() {
+                return None;
+            }
+            let full_name = format!("{}_{}", prefix, field_name);
+            let name = match self {
+                AccessorCaseConvention::CamelCase => to_camel_case(&full_name),
+                AccessorCaseConvention::SnakeCase => to_snake_case(&full_name),
+                AccessorCaseConvention::PascalCase => to_pascal_case(&full_name),
+            };
+            Some(name)
+        }
+    }
+
+    let member_id = match semantic_decl_id {
+        LuaSemanticDeclId::Member(id) => id,
+        _ => return None,
+    };
+    let current_owner = semantic_model
+        .get_db()
+        .get_member_index()
+        .get_current_owner(member_id)?;
+    let prefix_type = match current_owner {
+        LuaMemberOwner::Type(id) => LuaType::Ref(id.clone()),
+        _ => return None,
+    };
+    let property = semantic_model
+        .get_db()
+        .get_property_index()
+        .get_property(&semantic_decl_id)?;
+
+    let attribute_use = property.find_attribute_use("field_accessor")?;
+    let has_getter =
+        if let Some(LuaType::DocStringConst(getter)) = attribute_use.get_param_by_name("getter") {
+            try_add_accessor_location(
+                semantic_model,
+                &prefix_type,
+                getter.as_str().into(),
+                locations,
+            )
+        } else {
+            false
+        };
+    let has_setter =
+        if let Some(LuaType::DocStringConst(setter)) = attribute_use.get_param_by_name("setter") {
+            try_add_accessor_location(
+                semantic_model,
+                &prefix_type,
+                setter.as_str().into(),
+                locations,
+            )
+        } else {
+            false
+        };
+
+    // 显式指定了获取器与设置器, 则不需要根据规则处理
+    if has_getter && has_setter {
+        return Some(());
+    }
+    // 根据规则处理
+    // "camelCase"|"PascalCase"|"snake_case"
+    let convention = {
+        if let Some(LuaType::DocStringConst(convention)) =
+            attribute_use.get_param_by_name("convention")
+        {
+            match convention.as_str() {
+                "camelCase" => AccessorCaseConvention::CamelCase,
+                "snake_case" => AccessorCaseConvention::SnakeCase,
+                "PascalCase" => AccessorCaseConvention::PascalCase,
+                _ => AccessorCaseConvention::CamelCase,
+            }
+        } else {
+            AccessorCaseConvention::CamelCase
+        }
+    };
+
+    let Some(original_name) = semantic_model
+        .get_db()
+        .get_member_index()
+        .get_member(member_id)?
+        .get_key()
+        .get_name()
+    else {
+        return Some(());
+    };
+
+    if !has_getter {
+        if let Some(getter_name) = convention.build_name("get", original_name) {
+            try_add_accessor_location(semantic_model, &prefix_type, getter_name, locations);
+        }
+    }
+
+    if !has_setter {
+        if let Some(setter_name) = convention.build_name("set", original_name) {
+            try_add_accessor_location(semantic_model, &prefix_type, setter_name, locations);
+        }
+    }
+
+    Some(())
+}
+
+/// 尝试添加访问器位置到位置列表中
+fn try_add_accessor_location(
+    semantic_model: &SemanticModel,
+    prefix_type: &LuaType,
+    accessor_name: String,
+    locations: &mut Vec<Location>,
+) -> bool {
+    let accessor_key = LuaMemberKey::Name(accessor_name.as_str().into());
+    if let Some(member_infos) =
+        semantic_model.get_member_info_with_key(prefix_type, accessor_key, false)
+    {
+        if let Some(member_info) = member_infos.first()
+            && let Some(LuaSemanticDeclId::Member(accessor_id)) = member_info.property_owner_id
+            && let Some(location) = get_member_location(semantic_model, &accessor_id)
+        {
+            locations.push(location);
+            return true;
+        }
+    }
+    false
 }

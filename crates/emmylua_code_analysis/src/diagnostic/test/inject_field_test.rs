@@ -46,6 +46,26 @@ mod test {
     }
 
     #[test]
+    fn test_class_def_dynamic_key_in_method_is_allowed() {
+        let mut ws = VirtualWorkspace::new();
+        assert!(ws.check_code_for(
+            DiagnosticCode::InjectField,
+            r#"
+            ---@class TestBind
+            Bind = {}
+
+            ---@class TestFunc
+            ---@field call_name string
+            local M = {}
+
+            function M:call()
+                Bind[self.call_name] = 1
+            end
+        "#
+        ));
+    }
+
+    #[test]
     fn test_super_table() {
         let mut ws = VirtualWorkspace::new();
         assert!(ws.check_code_for(
@@ -130,24 +150,110 @@ mod test {
         ));
     }
 
-    // #[test]
-    // fn test_tuple() {
-    //     let mut ws = VirtualWorkspace::new();
-    //     assert!(ws.check_code_for(
-    //         DiagnosticCode::InjectField,
-    //         r#"
-    //             local a = { 'a' }
-    //             a[#a + 1] = 'b'
-    //     "#
-    //     ));
+    #[test]
+    fn test_tuple() {
+        let mut ws = VirtualWorkspace::new();
+        assert!(ws.check_code_for(
+            DiagnosticCode::InjectField,
+            r#"
+                local a = { 'a' }
+                a[#a + 1] = 'b'
+        "#
+        ));
 
-    //     // assert!(!ws.check_code_for(
-    //     //     DiagnosticCode::InjectField,
-    //     //     r#"
-    //     //         ---@type [ 'a' ]
-    //     //         local a = { 'a' }
-    //     //         a[#a + 1] = 'b'
-    //     // "#
-    //     // ));
-    // }
+        // assert!(!ws.check_code_for(
+        //     DiagnosticCode::InjectField,
+        //     r#"
+        //         ---@type [ 'a' ]
+        //         local a = { 'a' }
+        //         a[#a + 1] = 'b'
+        // "#
+        // ));
+    }
+
+    #[test]
+    fn test_export() {
+        let mut ws = VirtualWorkspace::new();
+        ws.def_file(
+            "a.lua",
+            r#"
+            ---@export
+            local export = {}
+
+            export.a = 1
+
+            return export
+            "#,
+        );
+        assert!(!ws.check_code_for(
+            DiagnosticCode::InjectField,
+            r#"
+            local a = require("a")
+            a.newField = 1
+            "#,
+        ));
+        assert!(ws.check_code_for(
+            DiagnosticCode::InjectField,
+            r#"
+            local a = require("a")
+            a.a = 2
+            "#,
+        ));
+    }
+
+    #[test]
+    fn test_export_2() {
+        let mut ws = VirtualWorkspace::new();
+        ws.def_file(
+            "a.lua",
+            r#"
+            ---@export
+            return {
+                a = 1
+            }
+            "#,
+        );
+        assert!(!ws.check_code_for(
+            DiagnosticCode::InjectField,
+            r#"
+            local a = require("a")
+            a.newField = 1
+            "#,
+        ));
+        assert!(ws.check_code_for(
+            DiagnosticCode::InjectField,
+            r#"
+            local a = require("a")
+            a.a = 2
+            "#,
+        ));
+    }
+
+    #[test]
+    fn test_issue_660() {
+        let mut ws = VirtualWorkspace::new();
+        ws.def_file(
+            "a.lua",
+            r#"
+            --- @class (private) vim.var_accessor
+            --- @field [string] any
+            --- @field [integer] vim.var_accessor
+
+            vim = {}
+
+            ---@type vim.var_accessor
+            vim.g = {}
+            "#,
+        );
+        assert!(ws.check_code_for(
+            DiagnosticCode::InjectField,
+            r#"
+            if vim.g.aaa then
+                return
+            end
+
+            vim.g.aaa = true
+            "#,
+        ));
+    }
 }

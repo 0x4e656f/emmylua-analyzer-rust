@@ -180,7 +180,7 @@ tags.operator: |
   `operator` 標籤用於表示運算符重載。
   示例:
   ```lua
-  ---@class 
+  ---@class
   ---@operator add(MyClass):MyClass
   ```
 tags.module: |
@@ -217,4 +217,41 @@ tags.readonly: |
   ```lua
   ---@readonly
   MyClass.readonlyField = "constant"
+  ```
+tags.export: |
+  `export` 標籤用於表示一個變量為導出的，用於支持快速導入。
+  接收的參數為 `namespace` 或 `global`，不輸入參數默認為 `global`。
+  示例:
+  ```lua
+  ---@export namespace -- 當為`namespace`時僅允許同命名空間引入
+  local export = {}
+
+  export.func = function()
+    -- 在其他文件輸入`func`時會提示導入
+  end
+  ```
+tags.language: |
+  `language` 標籤用於為程式碼塊指定語言注入。
+  示例:
+  ```lua
+  ---@language sql
+  local t = [[
+      SELECT * FROM users WHERE id = 1;
+      SELECT name, email FROM users WHERE active = 1;
+      UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = 1;
+      DELETE FROM users WHERE id = 2;
+      INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
+  ]]
+  ```
+tags.attribute: |
+  `attribute` 標籤定義一個特性。特性用於附加額外信息到定義。
+  示例:
+  ```lua
+  ---@attribute deprecated(message: string?)
+
+  ---@class A
+  ---@[deprecated("delete")] # `b` 字段被標記為已棄用
+  ---@field b string
+  ---@[deprecated] # 如果`attribute`允許無參數，則可以省略括號
+  ---@field c string
   ```

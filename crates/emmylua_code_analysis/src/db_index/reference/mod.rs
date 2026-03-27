@@ -4,14 +4,13 @@ mod string_reference;
 use std::collections::{HashMap, HashSet};
 
 use emmylua_parser::LuaSyntaxId;
-pub use file_reference::{DeclReference, FileReference};
+pub use file_reference::{DeclReference, DeclReferenceCell, FileReference};
 use rowan::TextRange;
 use smol_str::SmolStr;
 use string_reference::StringReference;
 
+use super::{LuaDeclId, LuaMemberKey, LuaTypeDeclId, traits::LuaIndex};
 use crate::{FileId, InFiled};
-
-use super::{traits::LuaIndex, LuaDeclId, LuaMemberKey, LuaTypeDeclId};
 
 #[derive(Debug)]
 pub struct LuaReferenceIndex {
@@ -20,6 +19,12 @@ pub struct LuaReferenceIndex {
     global_references: HashMap<SmolStr, HashMap<FileId, HashSet<LuaSyntaxId>>>,
     string_references: HashMap<FileId, StringReference>,
     type_references: HashMap<FileId, HashMap<LuaTypeDeclId, HashSet<TextRange>>>,
+}
+
+impl Default for LuaReferenceIndex {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl LuaReferenceIndex {
@@ -42,7 +47,7 @@ impl LuaReferenceIndex {
     ) {
         self.file_references
             .entry(file_id)
-            .or_insert_with(FileReference::new)
+            .or_default()
             .add_decl_reference(decl_id, range, is_write);
     }
 
@@ -50,9 +55,9 @@ impl LuaReferenceIndex {
         let key = SmolStr::new(name);
         self.global_references
             .entry(key)
-            .or_insert_with(HashMap::new)
+            .or_default()
             .entry(file_id)
-            .or_insert_with(HashSet::new)
+            .or_default()
             .insert(syntax_id);
     }
 
@@ -64,9 +69,9 @@ impl LuaReferenceIndex {
     ) {
         self.index_reference
             .entry(key)
-            .or_insert_with(HashMap::new)
+            .or_default()
             .entry(file_id)
-            .or_insert_with(HashSet::new)
+            .or_default()
             .insert(syntax_id);
     }
 
@@ -85,9 +90,9 @@ impl LuaReferenceIndex {
     ) {
         self.type_references
             .entry(file_id)
-            .or_insert_with(HashMap::new)
+            .or_default()
             .entry(type_decl_id)
-            .or_insert_with(HashSet::new)
+            .or_default()
             .insert(range);
     }
 
@@ -96,25 +101,27 @@ impl LuaReferenceIndex {
     }
 
     pub fn create_local_reference(&mut self, file_id: FileId) {
-        self.file_references
-            .entry(file_id)
-            .or_insert_with(FileReference::new);
+        self.file_references.entry(file_id).or_default();
     }
 
     pub fn get_decl_references(
         &self,
         file_id: &FileId,
         decl_id: &LuaDeclId,
-    ) -> Option<&Vec<DeclReference>> {
+    ) -> Option<&DeclReference> {
         self.file_references
             .get(file_id)?
             .get_decl_references(decl_id)
     }
 
+    pub fn get_var_reference_decl(&self, file_id: &FileId, range: TextRange) -> Option<LuaDeclId> {
+        self.file_references.get(file_id)?.get_decl_id(&range)
+    }
+
     pub fn get_decl_references_map(
         &self,
         file_id: &FileId,
-    ) -> Option<&HashMap<LuaDeclId, Vec<DeclReference>>> {
+    ) -> Option<&HashMap<LuaDeclId, DeclReference>> {
         self.file_references
             .get(file_id)
             .map(|file_reference| file_reference.get_decl_references_map())
@@ -148,12 +155,11 @@ impl LuaReferenceIndex {
             .global_references
             .get(name)?
             .iter()
-            .map(|(file_id, syntax_ids)| {
+            .flat_map(|(file_id, syntax_ids)| {
                 syntax_ids
                     .iter()
                     .map(|syntax_id| InFiled::new(*file_id, *syntax_id))
             })
-            .flatten()
             .collect();
 
         Some(results)
@@ -162,33 +168,28 @@ impl LuaReferenceIndex {
     pub fn get_index_references(&self, key: &LuaMemberKey) -> Option<Vec<InFiled<LuaSyntaxId>>> {
         let results = self
             .index_reference
-            .get(&key)?
+            .get(key)?
             .iter()
-            .map(|(file_id, syntax_ids)| {
+            .flat_map(|(file_id, syntax_ids)| {
                 syntax_ids
                     .iter()
                     .map(|syntax_id| InFiled::new(*file_id, *syntax_id))
             })
-            .flatten()
             .collect();
 
         Some(results)
     }
 
     pub fn get_string_references(&self, string_value: &str) -> Vec<InFiled<TextRange>> {
-        let results = self
-            .string_references
+        self.string_references
             .iter()
-            .map(|(file_id, string_reference)| {
+            .flat_map(|(file_id, string_reference)| {
                 string_reference
-                    .get_string_references(&string_value)
+                    .get_string_references(string_value)
                     .into_iter()
                     .map(|range| InFiled::new(*file_id, range))
             })
-            .flatten()
-            .collect();
-
-        results
+            .collect()
     }
 
     pub fn get_type_references(
@@ -198,14 +199,13 @@ impl LuaReferenceIndex {
         let results = self
             .type_references
             .iter()
-            .map(|(file_id, type_references)| {
+            .flat_map(|(file_id, type_references)| {
                 type_references
                     .get(type_decl_id)
                     .into_iter()
                     .flatten()
-                    .map(|range| InFiled::new(*file_id, range.clone()))
+                    .map(|range| InFiled::new(*file_id, *range))
             })
-            .flatten()
             .collect();
 
         Some(results)

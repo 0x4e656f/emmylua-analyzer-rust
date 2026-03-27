@@ -22,7 +22,7 @@ mod test {
 
                 for i, extendsName in ipairs(a) do
                     print(extendsName.a)
-                end 
+                end
             "#
         ));
     }
@@ -78,6 +78,24 @@ mod test {
             r#"
             local a ---@type 'A'
             local _ = a:lower()
+            "#
+        ));
+    }
+
+    #[test]
+    fn test_issue_917() {
+        let mut ws = VirtualWorkspace::new();
+        assert!(ws.check_code_for(
+            DiagnosticCode::UndefinedField,
+            r#"
+                ---@alias Required917<T> { [K in keyof T]: T[K]; }
+
+                ---@alias SomeMap917 { some_int?: integer, some_str?: string }
+
+                ---@type Required917<SomeMap917>
+                local a
+
+                local _ = a.some_int
             "#
         ));
     }
@@ -377,7 +395,7 @@ mod test {
             ---| '隐藏'
             ---| '普通'
 
-            
+
             ---@param name AbilityType | AbilityTypeAlias
             local function get(name)
                 local a = AbilityType[name]
@@ -580,10 +598,10 @@ mod test {
         ws.def(
             r#"
         ---@class py.Dict
-        
+
         ---@return py.Dict
         local function lua_get_start_args() end
-        
+
         ---@type table<string, string>
         arg = lua_get_start_args()
         "#,
@@ -732,6 +750,71 @@ mod test {
                 local c
                 if Flags[c] then
                 end
+        "#
+        ));
+    }
+
+    #[test]
+    fn test_export() {
+        let mut ws = VirtualWorkspace::new();
+        ws.def_file(
+            "a.lua",
+            r#"
+            ---@export
+            local export = {}
+
+            return export
+            "#,
+        );
+        assert!(!ws.check_code_for(
+            DiagnosticCode::UndefinedField,
+            r#"
+            local a = require("a")
+            a.func()
+            "#,
+        ));
+
+        assert!(!ws.check_code_for(
+            DiagnosticCode::UndefinedField,
+            r#"
+            local a = require("a").ABC
+            "#,
+        ));
+
+        assert!(!ws.check_code_for(
+            DiagnosticCode::UndefinedField,
+            r#"
+
+            ---@export
+            local export = {}
+
+            export.aaa()
+
+            return export
+
+            "#,
+        ));
+    }
+
+    #[test]
+    fn test_keyof_type() {
+        let mut ws = VirtualWorkspace::new();
+        ws.def(
+            r#"
+        ---@class SuiteHooks
+        ---@field beforeAll string
+
+        ---@type SuiteHooks
+        hooks = {}
+
+        ---@type keyof SuiteHooks
+        name = "beforeAll"
+            "#,
+        );
+        assert!(ws.check_code_for(
+            DiagnosticCode::UndefinedField,
+            r#"
+        local a = hooks[name]
         "#
         ));
     }

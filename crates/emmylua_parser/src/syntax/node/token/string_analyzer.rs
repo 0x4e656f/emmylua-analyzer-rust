@@ -1,7 +1,7 @@
 use crate::{
+    LuaKind, LuaSyntaxToken,
     kind::LuaTokenKind,
     parser_error::{LuaParseError, LuaParseErrorKind},
-    LuaKind, LuaSyntaxToken,
 };
 
 pub fn string_token_value(token: &LuaSyntaxToken) -> Result<String, LuaParseError> {
@@ -167,7 +167,7 @@ fn normal_string_value(token: &LuaSyntaxToken) -> Result<String, LuaParseError> 
                                     chars.next();
                                 }
                             }
-                            if let Ok(value) = u8::from_str_radix(&dec, 10) {
+                            if let Ok(value) = dec.parse::<u8>() {
                                 result.push(value as char);
                             }
                         }

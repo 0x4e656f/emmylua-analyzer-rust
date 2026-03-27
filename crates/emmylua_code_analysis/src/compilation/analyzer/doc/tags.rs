@@ -3,23 +3,27 @@ use emmylua_parser::{
 };
 
 use crate::{
+    AnalyzeError, DiagnosticCode, LuaDeclId,
+    compilation::analyzer::doc::{
+        attribute_tags::analyze_tag_attribute_use, property_tags::analyze_readonly,
+        type_def_tags::analyze_attribute, type_ref_tags::analyze_doc_tag_schema,
+    },
     db_index::{LuaMemberId, LuaSemanticDeclId, LuaSignatureId},
-    LuaDeclId,
 };
 
 use super::{
+    DocAnalyzer,
     diagnostic_tags::analyze_diagnostic,
     field_or_operator_def_tags::{analyze_field, analyze_operator},
     property_tags::{
-        analyze_async, analyze_deprecated, analyze_nodiscard, analyze_source, analyze_version,
-        analyze_visibility,
+        analyze_async, analyze_deprecated, analyze_export, analyze_nodiscard, analyze_source,
+        analyze_version, analyze_visibility,
     },
     type_def_tags::{analyze_alias, analyze_class, analyze_enum, analyze_func_generic},
     type_ref_tags::{
         analyze_as, analyze_cast, analyze_module, analyze_other, analyze_overload, analyze_param,
-        analyze_return, analyze_return_cast, analyze_see, analyze_type,
+        analyze_return, analyze_return_cast, analyze_return_overload, analyze_see, analyze_type,
     },
-    DocAnalyzer,
 };
 
 pub fn analyze_tag(analyzer: &mut DocAnalyzer, tag: LuaDocTag) -> Option<()> {
@@ -37,6 +41,9 @@ pub fn analyze_tag(analyzer: &mut DocAnalyzer, tag: LuaDocTag) -> Option<()> {
         LuaDocTag::Alias(alias) => {
             analyze_alias(analyzer, alias)?;
         }
+        LuaDocTag::Attribute(attribute) => {
+            analyze_attribute(analyzer, attribute)?;
+        }
 
         // ref
         LuaDocTag::Type(type_tag) => {
@@ -47,6 +54,9 @@ pub fn analyze_tag(analyzer: &mut DocAnalyzer, tag: LuaDocTag) -> Option<()> {
         }
         LuaDocTag::Return(return_tag) => {
             analyze_return(analyzer, return_tag)?;
+        }
+        LuaDocTag::ReturnOverload(return_overload_tag) => {
+            analyze_return_overload(analyzer, return_overload_tag)?;
         }
         LuaDocTag::ReturnCast(return_cast) => {
             analyze_return_cast(analyzer, return_cast)?;
@@ -74,8 +84,8 @@ pub fn analyze_tag(analyzer: &mut DocAnalyzer, tag: LuaDocTag) -> Option<()> {
         LuaDocTag::Version(version) => {
             analyze_version(analyzer, version)?;
         }
-        LuaDocTag::Async(_) => {
-            analyze_async(analyzer)?;
+        LuaDocTag::Async(tag) => {
+            analyze_async(analyzer, tag)?;
         }
 
         // field or operator
@@ -103,6 +113,19 @@ pub fn analyze_tag(analyzer: &mut DocAnalyzer, tag: LuaDocTag) -> Option<()> {
         }
         LuaDocTag::Other(other) => {
             analyze_other(analyzer, other)?;
+        }
+        LuaDocTag::Export(export) => {
+            analyze_export(analyzer, export)?;
+        }
+        LuaDocTag::Readonly(readonly) => {
+            analyze_readonly(analyzer, readonly)?;
+        }
+        // 属性使用, 与 ---@tag 的语法不同
+        LuaDocTag::AttributeUse(attribute_use) => {
+            analyze_tag_attribute_use(analyzer, attribute_use)?;
+        }
+        LuaDocTag::Schema(doc_schema) => {
+            analyze_doc_tag_schema(analyzer, doc_schema);
         }
         _ => {}
     }
@@ -132,8 +155,30 @@ pub fn find_owner_closure(analyzer: &DocAnalyzer) -> Option<LuaClosureExpr> {
     None
 }
 
-pub fn get_owner_id(analyzer: &mut DocAnalyzer) -> Option<LuaSemanticDeclId> {
-    let owner = analyzer.comment.get_owner()?;
+pub fn find_owner_closure_or_report(
+    analyzer: &mut DocAnalyzer,
+    tag: &impl LuaAstNode,
+) -> Option<LuaClosureExpr> {
+    match find_owner_closure(analyzer) {
+        Some(id) => Some(id),
+        None => {
+            report_orphan_tag(analyzer, tag);
+            None
+        }
+    }
+}
+
+pub fn get_owner_id(
+    analyzer: &mut DocAnalyzer,
+    owner: Option<LuaAst>,
+    find_doc_field: bool,
+) -> Option<LuaSemanticDeclId> {
+    if !find_doc_field {
+        if let Some(current_type_id) = &analyzer.current_type_id {
+            return Some(LuaSemanticDeclId::TypeDecl(current_type_id.clone()));
+        }
+    }
+    let owner = owner.or_else(|| analyzer.comment.get_owner())?;
     match owner {
         LuaAst::LuaAssignStat(assign) => {
             let first_var = assign.child::<LuaVarExpr>()?;
@@ -141,22 +186,22 @@ pub fn get_owner_id(analyzer: &mut DocAnalyzer) -> Option<LuaSemanticDeclId> {
                 LuaVarExpr::NameExpr(name_expr) => {
                     let decl_id = LuaDeclId::new(analyzer.file_id, name_expr.get_position());
                     let _ = analyzer.db.get_decl_index_mut().get_decl_mut(&decl_id)?;
-                    return Some(LuaSemanticDeclId::LuaDecl(decl_id));
+                    Some(LuaSemanticDeclId::LuaDecl(decl_id))
                 }
                 LuaVarExpr::IndexExpr(index_expr) => {
                     let member_id = LuaMemberId::new(index_expr.get_syntax_id(), analyzer.file_id);
-                    return Some(LuaSemanticDeclId::Member(member_id));
+                    Some(LuaSemanticDeclId::Member(member_id))
                 } // _ => None,
             }
         }
         LuaAst::LuaLocalStat(local_stat) => {
             let local_name = local_stat.child::<LuaLocalName>()?;
             let decl_id = LuaDeclId::new(analyzer.file_id, local_name.get_position());
-            return Some(LuaSemanticDeclId::LuaDecl(decl_id));
+            Some(LuaSemanticDeclId::LuaDecl(decl_id))
         }
         LuaAst::LuaTableField(field) => {
             let member_id = LuaMemberId::new(field.get_syntax_id(), analyzer.file_id);
-            return Some(LuaSemanticDeclId::Member(member_id));
+            Some(LuaSemanticDeclId::Member(member_id))
         }
         LuaAst::LuaCallExprStat(call_expr_stat) => {
             let call_expr = call_expr_stat.get_call_expr()?;
@@ -174,6 +219,10 @@ pub fn get_owner_id(analyzer: &mut DocAnalyzer) -> Option<LuaSemanticDeclId> {
         LuaAst::LuaClosureExpr(closure) => Some(LuaSemanticDeclId::Signature(
             LuaSignatureId::from_closure(analyzer.file_id, &closure),
         )),
+        LuaAst::LuaDocTagField(tag) => {
+            let member_id = LuaMemberId::new(tag.get_syntax_id(), analyzer.file_id);
+            Some(LuaSemanticDeclId::Member(member_id))
+        }
         _ => {
             let closure = find_owner_closure(analyzer)?;
             Some(LuaSemanticDeclId::Signature(LuaSignatureId::from_closure(
@@ -182,4 +231,28 @@ pub fn get_owner_id(analyzer: &mut DocAnalyzer) -> Option<LuaSemanticDeclId> {
             )))
         }
     }
+}
+
+pub fn get_owner_id_or_report(
+    analyzer: &mut DocAnalyzer,
+    tag: &impl LuaAstNode,
+) -> Option<LuaSemanticDeclId> {
+    match get_owner_id(analyzer, None, false) {
+        Some(id) => Some(id),
+        None => {
+            report_orphan_tag(analyzer, tag);
+            None
+        }
+    }
+}
+
+pub fn report_orphan_tag(analyzer: &mut DocAnalyzer, tag: &impl LuaAstNode) {
+    analyzer.db.get_diagnostic_index_mut().add_diagnostic(
+        analyzer.file_id,
+        AnalyzeError {
+            kind: DiagnosticCode::AnnotationUsageError,
+            message: t!("`@%{name}` can't be used here", name = tag.get_text()).to_string(),
+            range: tag.get_range(),
+        },
+    );
 }

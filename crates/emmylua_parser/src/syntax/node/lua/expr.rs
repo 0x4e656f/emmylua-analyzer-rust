@@ -1,14 +1,15 @@
 use crate::{
+    LuaAstToken, LuaComment, LuaDocTagCallGeneric, LuaDocTypeList, LuaIndexToken, LuaKind,
+    LuaLiteralToken, LuaSyntaxNode, LuaSyntaxToken, LuaTokenKind,
     kind::LuaSyntaxKind,
     syntax::{
         node::{LuaBinaryOpToken, LuaNameToken, LuaUnaryOpToken},
         traits::{LuaAstChildren, LuaAstNode, LuaCommentOwner},
     },
-    LuaAstToken, LuaIndexToken, LuaLiteralToken, LuaSyntaxNode, LuaSyntaxToken, LuaTokenKind,
 };
 
 use super::{
-    path_trait::PathTrait, LuaBlock, LuaCallArgList, LuaIndexKey, LuaParamList, LuaTableField,
+    LuaBlock, LuaCallArgList, LuaIndexKey, LuaParamList, LuaTableField, path_trait::PathTrait,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -43,25 +44,25 @@ impl LuaAstNode for LuaExpr {
     where
         Self: Sized,
     {
-        match kind {
+        matches!(
+            kind,
             LuaSyntaxKind::CallExpr
-            | LuaSyntaxKind::AssertCallExpr
-            | LuaSyntaxKind::ErrorCallExpr
-            | LuaSyntaxKind::RequireCallExpr
-            | LuaSyntaxKind::TypeCallExpr
-            | LuaSyntaxKind::SetmetatableCallExpr => true,
-            LuaSyntaxKind::TableArrayExpr
-            | LuaSyntaxKind::TableObjectExpr
-            | LuaSyntaxKind::TableEmptyExpr => true,
-            LuaSyntaxKind::LiteralExpr => true,
-            LuaSyntaxKind::BinaryExpr => true,
-            LuaSyntaxKind::UnaryExpr => true,
-            LuaSyntaxKind::ClosureExpr => true,
-            LuaSyntaxKind::ParenExpr => true,
-            LuaSyntaxKind::NameExpr => true,
-            LuaSyntaxKind::IndexExpr => true,
-            _ => false,
-        }
+                | LuaSyntaxKind::AssertCallExpr
+                | LuaSyntaxKind::ErrorCallExpr
+                | LuaSyntaxKind::RequireCallExpr
+                | LuaSyntaxKind::TypeCallExpr
+                | LuaSyntaxKind::SetmetatableCallExpr
+                | LuaSyntaxKind::TableArrayExpr
+                | LuaSyntaxKind::TableObjectExpr
+                | LuaSyntaxKind::TableEmptyExpr
+                | LuaSyntaxKind::LiteralExpr
+                | LuaSyntaxKind::BinaryExpr
+                | LuaSyntaxKind::UnaryExpr
+                | LuaSyntaxKind::ClosureExpr
+                | LuaSyntaxKind::ParenExpr
+                | LuaSyntaxKind::NameExpr
+                | LuaSyntaxKind::IndexExpr
+        )
     }
 
     fn cast(syntax: LuaSyntaxNode) -> Option<Self>
@@ -110,11 +111,7 @@ impl LuaAstNode for LuaVarExpr {
     where
         Self: Sized,
     {
-        match kind {
-            LuaSyntaxKind::NameExpr => true,
-            LuaSyntaxKind::IndexExpr => true,
-            _ => false,
-        }
+        matches!(kind, LuaSyntaxKind::NameExpr | LuaSyntaxKind::IndexExpr)
     }
 
     fn cast(syntax: LuaSyntaxNode) -> Option<Self>
@@ -125,6 +122,15 @@ impl LuaAstNode for LuaVarExpr {
             LuaSyntaxKind::NameExpr => LuaNameExpr::cast(syntax).map(LuaVarExpr::NameExpr),
             LuaSyntaxKind::IndexExpr => LuaIndexExpr::cast(syntax).map(LuaVarExpr::IndexExpr),
             _ => None,
+        }
+    }
+}
+
+impl LuaVarExpr {
+    pub fn to_expr(&self) -> LuaExpr {
+        match self {
+            LuaVarExpr::NameExpr(node) => LuaExpr::NameExpr(node.clone()),
+            LuaVarExpr::IndexExpr(node) => LuaExpr::IndexExpr(node.clone()),
         }
     }
 }
@@ -158,13 +164,13 @@ impl LuaAstNode for LuaSingleArgExpr {
     where
         Self: Sized,
     {
-        match kind {
+        matches!(
+            kind,
             LuaSyntaxKind::TableArrayExpr
-            | LuaSyntaxKind::TableObjectExpr
-            | LuaSyntaxKind::TableEmptyExpr => true,
-            LuaSyntaxKind::LiteralExpr => true,
-            _ => false,
-        }
+                | LuaSyntaxKind::TableObjectExpr
+                | LuaSyntaxKind::TableEmptyExpr
+                | LuaSyntaxKind::LiteralExpr
+        )
     }
 
     fn cast(syntax: LuaSyntaxNode) -> Option<Self>
@@ -418,6 +424,27 @@ impl LuaCallExpr {
 
     pub fn is_setmetatable(&self) -> bool {
         self.syntax().kind() == LuaSyntaxKind::SetmetatableCallExpr.into()
+    }
+
+    pub fn get_call_generic_type_list(&self) -> Option<LuaDocTypeList> {
+        let mut current_node = self.syntax().first_child()?.next_sibling();
+
+        while let Some(node) = &current_node {
+            match node.kind() {
+                LuaKind::Syntax(LuaSyntaxKind::Comment) => {
+                    let comment = LuaComment::cast(node.clone())?;
+                    let call_generic = comment.child::<LuaDocTagCallGeneric>()?;
+                    return call_generic.get_type_list();
+                }
+                LuaKind::Syntax(LuaSyntaxKind::CallArgList) => {
+                    return None;
+                }
+                _ => {}
+            }
+            current_node = node.next_sibling();
+        }
+
+        None
     }
 }
 

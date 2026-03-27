@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use emmylua_parser::LuaLanguageLevel;
 use lsp_types::DiagnosticSeverity;
 use regex::Regex;
 use smol_str::SmolStr;
@@ -15,6 +16,7 @@ pub struct LuaDiagnosticConfig {
     pub global_disable_set: HashSet<SmolStr>,
     pub global_disable_glob: Vec<Regex>,
     pub severity: HashMap<DiagnosticCode, DiagnosticSeverity>,
+    pub level: LuaLanguageLevel,
 }
 
 impl LuaDiagnosticConfig {
@@ -43,7 +45,7 @@ impl LuaDiagnosticConfig {
 
         let mut severity = HashMap::new();
         for (code, sev) in &emmyrc.diagnostics.severity {
-            severity.insert(code.clone(), sev.clone().into());
+            severity.insert(*code, (*sev).into());
         }
         Self {
             workspace_disabled,
@@ -51,6 +53,7 @@ impl LuaDiagnosticConfig {
             global_disable_set,
             global_disable_glob,
             severity,
+            level: emmyrc.get_language_level(),
         }
     }
 }

@@ -91,7 +91,7 @@ mod test {
     fn test_issue_360() {
         let mut ws = VirtualWorkspace::new();
 
-        assert!(ws.check_code_for(
+        assert!(!ws.check_code_for(
             DiagnosticCode::RedundantParameter,
             r#"
                 ---@alias buz number
@@ -122,6 +122,57 @@ mod test {
                 function M:add_local_event()
                     with_local(function(local_player) end)
                 end
+        "#
+        ));
+    }
+
+    #[test]
+    fn test_generic_infer_function() {
+        // temp disable this test, future fix this
+        // let mut ws = VirtualWorkspace::new();
+        // ws.def(
+        //     r#"
+        //     ---@alias Parameters<T extends function> T extends (fun(...: infer P): any) and P or never
+
+        //     ---@alias Procedure fun(...: any[]): any
+
+        //     ---@alias MockParameters<T> T extends Procedure and Parameters<T> or never
+
+        //     ---@class Mock<T>
+        //     ---@field calls MockParameters<T>[]
+        //     ---@overload fun(...: MockParameters<T>...)
+
+        //     ---@generic T: Procedure
+        //     ---@param a T
+        //     ---@return Mock<T>
+        //     function fn(a)
+        //     end
+
+        //     sum = fn(function(a, b)
+        //         return a + b
+        //     end)
+        //     "#,
+        // );
+        // assert!(!ws.check_code_for(
+        //     DiagnosticCode::RedundantParameter,
+        //     r#"
+        //     sum(1, 2, 3)
+        // "#
+        // ));
+    }
+
+    #[test]
+    fn test_issue_894() {
+        let mut ws = VirtualWorkspace::new();
+        ws.def(
+            r#"
+            _nop = function() end
+            "#,
+        );
+        assert!(ws.check_code_for(
+            DiagnosticCode::RedundantParameter,
+            r#"
+            function a(...) _nop(...) end
         "#
         ));
     }

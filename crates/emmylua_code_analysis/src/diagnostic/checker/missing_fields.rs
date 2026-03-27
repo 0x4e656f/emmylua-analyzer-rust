@@ -4,7 +4,7 @@ use emmylua_parser::{LuaAstNode, LuaTableExpr};
 
 use crate::{DiagnosticCode, LuaMemberOwner, LuaType, LuaTypeCache, LuaTypeDeclId, SemanticModel};
 
-use super::{humanize_lint_type, Checker, DiagnosticContext};
+use super::{Checker, DiagnosticContext, humanize_lint_type};
 use itertools::Itertools;
 
 pub struct MissingFieldsChecker;
@@ -29,10 +29,56 @@ fn check_table_expr(
     type_cache: &mut HashMap<LuaType, HashSet<String>>,
 ) -> Option<()> {
     let db = context.db;
-    let table_type = semantic_model.infer_table_should_be(expr.clone())?;
 
-    let current_fields = expr
-        .get_fields()
+    let table_type = match semantic_model.infer_table_should_be(expr.clone())? {
+        LuaType::Union(union) => {
+            let mut set = HashSet::new();
+            for ty in union.into_vec().iter() {
+                match ty {
+                    LuaType::Ref(_)
+                    | LuaType::Object(_)
+                    | LuaType::Generic(_)
+                    | LuaType::Intersection(_) => {
+                        set.insert(ty.clone());
+                    }
+                    LuaType::Table | LuaType::Userdata => {
+                        return Some(());
+                    }
+                    LuaType::TableGeneric(_) => {
+                        return Some(());
+                    }
+                    _ => {}
+                }
+            }
+            match set.len() {
+                1 => set.into_iter().next()?.clone(),
+                _ => {
+                    return Some(());
+                }
+            }
+        }
+        LuaType::TableConst(in_file_range) => {
+            let file_id = in_file_range.file_id;
+            if file_id == semantic_model.get_file_id() {
+                let range = in_file_range.value;
+                if expr.get_range() == range {
+                    return Some(());
+                }
+            }
+
+            LuaType::TableConst(in_file_range)
+        }
+
+        table_type => table_type,
+    };
+
+    let fields = expr.get_fields().collect::<Vec<_>>();
+    if fields.len() > 50 {
+        return Some(());
+    }
+
+    let current_fields = fields
+        .iter()
         .filter_map(|field| field.get_field_key().map(|key| key.get_path_part()))
         .collect();
 
@@ -79,7 +125,7 @@ fn check_table_expr(
             expr.get_range(),
             t!(
                 "Missing required fields in type `%{typ}`: %{fields}",
-                typ = humanize_lint_type(&db, &table_type),
+                typ = humanize_lint_type(db, &table_type),
                 fields = missing_fields
             )
             .to_string(),
@@ -102,14 +148,14 @@ fn get_required_fields(
     for super_type in types {
         match super_type {
             LuaType::Ref(type_decl_id) => process_type_decl_id(
-                &context,
+                context,
                 member_index,
                 &mut required_fields,
                 &mut optional_type,
                 type_decl_id.clone(),
             ),
             LuaType::Generic(generic_type) => process_type_decl_id(
-                &context,
+                context,
                 member_index,
                 &mut required_fields,
                 &mut optional_type,

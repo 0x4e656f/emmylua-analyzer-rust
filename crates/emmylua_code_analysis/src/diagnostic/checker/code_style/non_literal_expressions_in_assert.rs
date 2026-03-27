@@ -1,8 +1,8 @@
 use emmylua_parser::{LuaAstNode, LuaCallExpr, LuaExpr, LuaLocalStat};
 
 use crate::{
-    diagnostic::checker::{Checker, DiagnosticContext},
     DiagnosticCode, SemanticModel,
+    diagnostic::checker::{Checker, DiagnosticContext},
 };
 
 pub struct NonLiteralExpressionsInAssertChecker;
@@ -42,10 +42,10 @@ fn check_assert_rule(
                     .get_db()
                     .get_decl_index()
                     .get_decl_tree(&semantic_model.get_file_id())?;
-                if let Some(decl) = decl_tree.find_local_decl(&name, name_expr.get_position()) {
-                    if decl.is_local() {
-                        return Some(());
-                    }
+                if let Some(decl) = decl_tree.find_local_decl(&name, name_expr.get_position())
+                    && decl.is_local()
+                {
+                    return Some(());
                 }
             }
             _ => {}

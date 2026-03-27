@@ -232,10 +232,10 @@ mod tests {
             local function dd()
                 return "11231"
             end
-            
+
             ---@return integer
             local function f()
-            
+
                 return dd() ---@as integer
             end
         "#
@@ -420,6 +420,103 @@ mod tests {
                     return node_or_range:range()
                 end
             end
+            "#
+        ));
+    }
+
+    #[test]
+    fn test_super_alias() {
+        let mut ws = VirtualWorkspace::new_with_init_std_lib();
+        assert!(ws.check_code_for(
+            DiagnosticCode::ReturnTypeMismatch,
+            r#"
+                ---@namespace Test
+
+                ---@alias A fun()
+
+                ---@class B<T>: A
+
+                ---@return A
+                local function subscribe()
+                    ---@type B<string>
+                    local a
+
+                    return a
+                end
+            "#
+        ));
+    }
+
+    #[test]
+    fn test_generic_type_extends() {
+        let mut ws = VirtualWorkspace::new_with_init_std_lib();
+        assert!(ws.check_code_for(
+            DiagnosticCode::ReturnTypeMismatch,
+            r#"
+                ---@class AnonymousObserver<T>: Observer<T>
+
+                ---@class Observer<T>: IDisposable
+
+                ---@class IDisposable
+
+                ---@generic T
+                ---@return IDisposable
+                local function createAnonymousObserver()
+                    ---@type AnonymousObserver<T>
+                    local observer = {}
+
+                    return observer
+                end
+            "#
+        ));
+    }
+
+    #[test]
+    fn test_generic_type_1() {
+        let mut ws = VirtualWorkspace::new();
+        ws.def(
+            r#"
+            ---@class Range: Observable<integer>
+            ---@class Observable<T>
+
+            ---@return Range
+            function newRange()
+            end
+            "#,
+        );
+        assert!(ws.check_code_for(
+            DiagnosticCode::ReturnTypeMismatch,
+            r#"
+
+            ---@return Observable<integer>
+            function range()
+                return newRange()
+            end
+
+            "#
+        ));
+    }
+
+    #[test]
+    fn test_generic_type_2() {
+        let mut ws = VirtualWorkspace::new();
+        ws.def(
+            r#"
+                ---@class Observable<T>
+                ---@class CountObservable<T>: Observable<integer>
+                CountObservable = {}
+                ---@return CountObservable<T>
+                function CountObservable:new()
+                end
+            "#,
+        );
+        assert!(ws.check_code_for(
+            DiagnosticCode::ReturnTypeMismatch,
+            r#"
+                ---@return Observable<integer>
+                local function count()
+                    return CountObservable:new()
+                end
             "#
         ));
     }

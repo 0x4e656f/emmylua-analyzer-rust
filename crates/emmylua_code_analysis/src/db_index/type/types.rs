@@ -1,6 +1,6 @@
 use std::{
-    collections::HashMap,
-    hash::{Hash, Hasher},
+    collections::{HashMap, HashSet},
+    hash::Hash,
     ops::Deref,
     sync::Arc,
 };
@@ -10,11 +10,18 @@ use rowan::TextRange;
 use smol_str::SmolStr;
 
 use crate::{
-    db_index::{LuaMemberKey, LuaSignatureId},
-    DbIndex, InFiled, SemanticModel,
+    AsyncState, DbIndex, FileId, InFiled, SemanticModel,
+    db_index::{
+        LuaMemberKey, LuaSignatureId,
+        r#type::{
+            basic_union::{BasicTypeKind, BasicTypeUnion},
+            type_visit_trait::TypeVisitTrait,
+        },
+    },
+    first_param_may_not_self,
 };
 
-use super::{type_decl::LuaTypeDeclId, TypeOps};
+use super::{GenericParam, TypeOps, type_decl::LuaTypeDeclId};
 
 #[derive(Debug, Clone)]
 pub enum LuaType {
@@ -40,7 +47,7 @@ pub enum LuaType {
     TableConst(InFiled<TextRange>),
     Ref(LuaTypeDeclId),
     Def(LuaTypeDeclId),
-    Array(Arc<LuaType>),
+    Array(Arc<LuaArrayType>),
     Tuple(Arc<LuaTupleType>),
     DocFunction(Arc<LuaFunctionType>),
     Object(Arc<LuaObjectType>),
@@ -60,6 +67,13 @@ pub enum LuaType {
     Call(Arc<LuaAliasCallType>),
     MultiLineUnion(Arc<LuaMultiLineUnion>),
     TypeGuard(Arc<LuaType>),
+    ConstTplRef(Arc<GenericTpl>),
+    Language(ArcIntern<SmolStr>),
+    ModuleRef(FileId),
+    DocAttribute(Arc<LuaAttributeType>),
+    Conditional(Arc<LuaConditionalType>),
+    ConditionalInfer(ArcIntern<SmolStr>),
+    Mapped(Arc<LuaMappedType>),
 }
 
 impl PartialEq for LuaType {
@@ -107,6 +121,13 @@ impl PartialEq for LuaType {
             (LuaType::MultiLineUnion(a), LuaType::MultiLineUnion(b)) => a == b,
             (LuaType::TypeGuard(a), LuaType::TypeGuard(b)) => a == b,
             (LuaType::Never, LuaType::Never) => true,
+            (LuaType::ConstTplRef(a), LuaType::ConstTplRef(b)) => a == b,
+            (LuaType::Language(a), LuaType::Language(b)) => a == b,
+            (LuaType::ModuleRef(a), LuaType::ModuleRef(b)) => a == b,
+            (LuaType::DocAttribute(a), LuaType::DocAttribute(b)) => a == b,
+            (LuaType::Conditional(a), LuaType::Conditional(b)) => a == b,
+            (LuaType::ConditionalInfer(a), LuaType::ConditionalInfer(b)) => a == b,
+            (LuaType::Mapped(a), LuaType::Mapped(b)) => a == b,
             _ => false, // 不同变体之间不相等
         }
     }
@@ -162,8 +183,14 @@ impl Hash for LuaType {
                 let ptr = Arc::as_ptr(a);
                 (31, ptr).hash(state)
             }
-            LuaType::TplRef(a) => (32, a).hash(state),
-            LuaType::StrTplRef(a) => (33, a).hash(state),
+            LuaType::TplRef(a) => {
+                let ptr = Arc::as_ptr(a);
+                (32, ptr).hash(state)
+            }
+            LuaType::StrTplRef(a) => {
+                let ptr = Arc::as_ptr(a);
+                (33, ptr).hash(state)
+            }
             LuaType::Variadic(a) => {
                 let ptr = Arc::as_ptr(a);
                 (34, ptr).hash(state)
@@ -183,6 +210,22 @@ impl Hash for LuaType {
                 (44, ptr).hash(state)
             }
             LuaType::Never => 45.hash(state),
+            LuaType::ConstTplRef(a) => {
+                let ptr = Arc::as_ptr(a);
+                (46, ptr).hash(state)
+            }
+            LuaType::Language(a) => (47, a).hash(state),
+            LuaType::ModuleRef(a) => (48, a).hash(state),
+            LuaType::Conditional(a) => {
+                let ptr = Arc::as_ptr(a);
+                (49, ptr).hash(state)
+            }
+            LuaType::ConditionalInfer(a) => (50, a).hash(state),
+            LuaType::Mapped(a) => {
+                let ptr = Arc::as_ptr(a);
+                (51, ptr).hash(state)
+            }
+            LuaType::DocAttribute(a) => (52, a).hash(state),
         }
     }
 }
@@ -231,7 +274,10 @@ impl LuaType {
     pub fn is_string(&self) -> bool {
         matches!(
             self,
-            LuaType::StringConst(_) | LuaType::String | LuaType::DocStringConst(_)
+            LuaType::StringConst(_)
+                | LuaType::String
+                | LuaType::DocStringConst(_)
+                | LuaType::Language(_)
         )
     }
 
@@ -272,7 +318,7 @@ impl LuaType {
     pub fn is_nullable(&self) -> bool {
         match self {
             LuaType::Nil => true,
-            LuaType::Union(u) => u.types.iter().any(|t| t.is_nullable()),
+            LuaType::Union(u) => u.is_nullable(),
             _ => false,
         }
     }
@@ -280,7 +326,7 @@ impl LuaType {
     pub fn is_optional(&self) -> bool {
         match self {
             LuaType::Nil | LuaType::Any | LuaType::Unknown => true,
-            LuaType::Union(u) => u.types.iter().any(|t| t.is_optional()),
+            LuaType::Union(u) => u.is_optional(),
             LuaType::Variadic(_) => true,
             _ => false,
         }
@@ -289,8 +335,9 @@ impl LuaType {
     pub fn is_always_truthy(&self) -> bool {
         match self {
             LuaType::Nil | LuaType::Boolean | LuaType::Any | LuaType::Unknown => false,
-            LuaType::BooleanConst(boolean) | LuaType::DocBooleanConst(boolean) => boolean.clone(),
-            LuaType::Union(u) => u.types.iter().all(|t| t.is_always_truthy()),
+            LuaType::BooleanConst(boolean) | LuaType::DocBooleanConst(boolean) => *boolean,
+            LuaType::Union(u) => u.is_always_truthy(),
+            LuaType::TypeGuard(_) => false,
             _ => true,
         }
     }
@@ -298,7 +345,8 @@ impl LuaType {
     pub fn is_always_falsy(&self) -> bool {
         match self {
             LuaType::Nil | LuaType::BooleanConst(false) | LuaType::DocBooleanConst(false) => true,
-            LuaType::Union(u) => u.types.iter().all(|t| t.is_always_falsy()),
+            LuaType::Union(u) => u.is_always_falsy(),
+            LuaType::TypeGuard(_) => false,
             _ => false,
         }
     }
@@ -379,6 +427,51 @@ impl LuaType {
         matches!(self, LuaType::Variadic(_))
     }
 
+    pub fn contain_multi_return(&self) -> bool {
+        match self {
+            LuaType::Variadic(_) => true,
+            LuaType::Union(union) => union.into_vec().iter().any(LuaType::contain_multi_return),
+            _ => false,
+        }
+    }
+
+    pub fn get_result_slot_type(&self, idx: usize) -> Option<LuaType> {
+        match self {
+            LuaType::Variadic(variadic) => match variadic.as_ref() {
+                VariadicType::Base(base) => Some(base.clone()),
+                VariadicType::Multi(types) => {
+                    let last_idx = types.len().checked_sub(1)?;
+                    if idx < last_idx {
+                        return types[idx].get_result_slot_type(0);
+                    }
+
+                    let last_type = types.get(last_idx)?;
+                    let offset = idx - last_idx;
+                    last_type.get_result_slot_type(offset)
+                }
+            },
+            LuaType::Union(union) => {
+                let slot_types = union
+                    .into_vec()
+                    .into_iter()
+                    .map(|ty| ty.get_result_slot_type(idx))
+                    .collect::<Vec<_>>();
+                if !slot_types.iter().any(|ty| ty.is_some()) {
+                    return None;
+                }
+
+                Some(LuaType::from_vec(
+                    slot_types
+                        .into_iter()
+                        .map(|ty| ty.unwrap_or(LuaType::Nil))
+                        .collect(),
+                ))
+            }
+            _ if idx == 0 => Some(self.clone()),
+            _ => None,
+        }
+    }
+
     pub fn is_global(&self) -> bool {
         matches!(self, LuaType::Global)
     }
@@ -398,8 +491,12 @@ impl LuaType {
             LuaType::Variadic(inner) => inner.contain_tpl(),
             LuaType::TplRef(_) => true,
             LuaType::StrTplRef(_) => true,
+            LuaType::ConstTplRef(_) => true,
             LuaType::SelfInfer => true,
             LuaType::MultiLineUnion(inner) => inner.contain_tpl(),
+            LuaType::TypeGuard(inner) => inner.contain_tpl(),
+            LuaType::Conditional(inner) => inner.contain_tpl(),
+            LuaType::Mapped(_) => true,
             _ => false,
         }
     }
@@ -419,12 +516,112 @@ impl LuaType {
     pub fn is_type_guard(&self) -> bool {
         matches!(self, LuaType::TypeGuard(_))
     }
+
+    pub fn is_multi_line_union(&self) -> bool {
+        matches!(self, LuaType::MultiLineUnion(_))
+    }
+
+    pub fn from_vec(types: Vec<LuaType>) -> Self {
+        match types.len() {
+            0 => LuaType::Nil,
+            1 => types[0].clone(),
+            _ => {
+                let mut result_types = Vec::new();
+                let mut hash_set = HashSet::new();
+                for typ in types {
+                    match typ {
+                        LuaType::Union(u) => {
+                            for t in u.into_vec() {
+                                if hash_set.insert(t.clone()) {
+                                    result_types.push(t);
+                                }
+                            }
+                        }
+                        _ => {
+                            if hash_set.insert(typ.clone()) {
+                                result_types.push(typ);
+                            }
+                        }
+                    }
+                }
+
+                match result_types.len() {
+                    0 => LuaType::Nil,
+                    1 => result_types[0].clone(),
+                    _ => LuaType::Union(LuaUnionType::from_vec(result_types).into()),
+                }
+            }
+        }
+    }
+
+    pub fn is_module_ref(&self) -> bool {
+        matches!(self, LuaType::ModuleRef(_))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LuaType, VariadicType};
+
+    #[test]
+    fn test_union_with_variadic_uses_result_slot_extraction() {
+        let variadic = LuaType::Variadic(VariadicType::Multi(vec![LuaType::String]).into());
+        let optional_variadic = LuaType::from_vec(vec![variadic.clone(), LuaType::Nil]);
+
+        assert_eq!(variadic.get_result_slot_type(0), Some(LuaType::String));
+        assert!(!optional_variadic.is_multi_return());
+        assert!(optional_variadic.contain_multi_return());
+        assert_eq!(
+            optional_variadic.get_result_slot_type(0),
+            Some(LuaType::from_vec(vec![LuaType::String, LuaType::Nil]))
+        );
+    }
+}
+
+impl TypeVisitTrait for LuaType {
+    fn visit_type<F>(&self, f: &mut F)
+    where
+        F: FnMut(&LuaType),
+    {
+        f(self);
+        match self {
+            LuaType::Array(base) => base.visit_type(f),
+            LuaType::Call(base) => base.visit_type(f),
+            LuaType::Tuple(base) => base.visit_type(f),
+            LuaType::DocFunction(base) => base.visit_type(f),
+            LuaType::Object(base) => base.visit_type(f),
+            LuaType::Union(base) => base.visit_type(f),
+            LuaType::Intersection(base) => base.visit_type(f),
+            LuaType::Generic(base) => base.visit_type(f),
+            LuaType::Variadic(multi) => multi.visit_type(f),
+            LuaType::TableGeneric(params) => {
+                for param in params.iter() {
+                    param.visit_type(f);
+                }
+            }
+            LuaType::MultiLineUnion(inner) => inner.visit_type(f),
+            LuaType::TypeGuard(inner) => inner.visit_type(f),
+            LuaType::Conditional(inner) => inner.visit_type(f),
+            _ => {}
+        }
+    }
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct LuaTupleType {
     types: Vec<LuaType>,
     pub status: LuaTupleStatus,
+}
+
+impl TypeVisitTrait for LuaTupleType {
+    fn visit_type<F>(&self, f: &mut F)
+    where
+        F: FnMut(&LuaType),
+    {
+        for ty in &self.types {
+            ty.visit_type(f);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -443,11 +640,29 @@ impl LuaTupleType {
     }
 
     pub fn get_type(&self, idx: usize) -> Option<&LuaType> {
-        self.types.get(idx)
+        if let Some(ty) = self.types.get(idx) {
+            return Some(ty);
+        };
+
+        if self.types.is_empty() {
+            return None;
+        }
+
+        let last_id = self.types.len() - 1;
+        let last_type = self.types.get(last_id)?;
+        if let LuaType::Variadic(variadic) = last_type {
+            return variadic.get_type(idx - last_id);
+        }
+
+        None
     }
 
     pub fn len(&self) -> usize {
         self.types.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.types.is_empty()
     }
 
     pub fn contain_tpl(&self) -> bool {
@@ -489,29 +704,46 @@ impl From<LuaTupleType> for LuaType {
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct LuaFunctionType {
-    is_async: bool,
+    async_state: AsyncState,
     is_colon_define: bool,
+    is_variadic: bool,
     params: Vec<(String, Option<LuaType>)>,
     ret: LuaType,
 }
 
+impl TypeVisitTrait for LuaFunctionType {
+    fn visit_type<F>(&self, f: &mut F)
+    where
+        F: FnMut(&LuaType),
+    {
+        for (_, t) in &self.params {
+            if let Some(t) = t {
+                t.visit_type(f);
+            }
+        }
+        self.ret.visit_type(f);
+    }
+}
+
 impl LuaFunctionType {
     pub fn new(
-        is_async: bool,
+        async_state: AsyncState,
         is_colon_define: bool,
+        is_variadic: bool,
         params: Vec<(String, Option<LuaType>)>,
         ret: LuaType,
     ) -> Self {
         Self {
-            is_async,
+            async_state,
             is_colon_define,
+            is_variadic,
             params,
             ret,
         }
     }
 
-    pub fn is_async(&self) -> bool {
-        self.is_async
+    pub fn get_async_state(&self) -> AsyncState {
+        self.async_state
     }
 
     pub fn is_colon_define(&self) -> bool {
@@ -526,6 +758,10 @@ impl LuaFunctionType {
         &self.ret
     }
 
+    pub fn is_variadic(&self) -> bool {
+        self.is_variadic
+    }
+
     pub fn get_variadic_ret(&self) -> VariadicType {
         if let LuaType::Variadic(variadic) = &self.ret {
             return variadic.deref().clone();
@@ -537,7 +773,7 @@ impl LuaFunctionType {
     pub fn contain_tpl(&self) -> bool {
         self.params
             .iter()
-            .any(|(_, t)| t.as_ref().map_or(false, |t| t.contain_tpl()))
+            .any(|(_, t)| t.as_ref().is_some_and(|t| t.contain_tpl()))
             || self.ret.contain_tpl()
     }
 
@@ -546,7 +782,7 @@ impl LuaFunctionType {
             || self
                 .params
                 .iter()
-                .any(|(name, t)| name == "self" || t.as_ref().map_or(false, |t| t.is_self_infer()))
+                .any(|(name, t)| name == "self" || t.as_ref().is_some_and(|t| t.is_self_infer()))
             || self.ret.is_self_infer()
     }
 
@@ -563,27 +799,40 @@ impl LuaFunctionType {
                     match owner_type {
                         Some(owner_type) => {
                             // 一些类型不应该被视为 method
-                            match (owner_type, t) {
-                                (LuaType::Ref(_) | LuaType::Def(_), _) => {
-                                    if t.is_any() || t.is_table() || t.is_class_tpl() {
-                                        return false;
-                                    }
-                                }
-                                _ => {}
+                            if matches!(owner_type, LuaType::Ref(_) | LuaType::Def(_))
+                                && first_param_may_not_self(t)
+                            {
+                                return false;
                             }
-
-                            semantic_model.type_check(owner_type, t).is_ok()
+                            if semantic_model.type_check(owner_type, t).is_ok() {
+                                return true;
+                            }
+                            // 如果名称是`self`, 则做更宽泛的检查
+                            name == "self" && semantic_model.type_check(t, owner_type).is_ok()
                         }
                         None => name == "self",
                     }
                 }
-                None => {
-                    return name == "self";
-                }
+                None => name == "self",
             }
         } else {
             false
         }
+    }
+
+    pub fn to_call_operator_func_type(&self) -> Arc<LuaFunctionType> {
+        let mut params = self.get_params().to_vec();
+        if params.first().is_some_and(|(name, _)| name == "@call_self") {
+            params.remove(0);
+        }
+
+        Arc::new(LuaFunctionType::new(
+            self.async_state,
+            false,
+            self.is_variadic,
+            params,
+            self.ret.clone(),
+        ))
     }
 }
 
@@ -604,6 +853,21 @@ pub enum LuaIndexAccessKey {
 pub struct LuaObjectType {
     fields: HashMap<LuaMemberKey, LuaType>,
     index_access: Vec<(LuaType, LuaType)>,
+}
+
+impl TypeVisitTrait for LuaObjectType {
+    fn visit_type<F>(&self, f: &mut F)
+    where
+        F: FnMut(&LuaType),
+    {
+        for t in self.fields.values() {
+            t.visit_type(f);
+        }
+        for (key, value_type) in &self.index_access {
+            key.visit_type(f);
+            value_type.visit_type(f);
+        }
+    }
 }
 
 impl LuaObjectType {
@@ -661,7 +925,7 @@ impl LuaObjectType {
     }
 
     pub fn cast_down_array_base(&self, db: &DbIndex) -> Option<LuaType> {
-        if self.index_access.len() != 0 {
+        if !self.index_access.is_empty() {
             let mut ty = None;
             for (key, value_type) in self.index_access.iter() {
                 if matches!(key, LuaType::Integer) {
@@ -708,70 +972,147 @@ impl From<LuaObjectType> for LuaType {
         LuaType::Object(t.into())
     }
 }
-#[derive(Debug, Clone)]
-pub struct LuaUnionType {
-    types: Vec<LuaType>,
+#[derive(Debug, Clone, Eq)]
+pub enum LuaUnionType {
+    Basic(BasicTypeUnion),
+    Nullable(LuaType),
+    Multi(Vec<LuaType>),
+}
+
+impl TypeVisitTrait for LuaUnionType {
+    fn visit_type<F>(&self, f: &mut F)
+    where
+        F: FnMut(&LuaType),
+    {
+        match self {
+            LuaUnionType::Basic(basic) => basic.visit_type(f),
+            LuaUnionType::Nullable(ty) => ty.visit_type(f),
+            LuaUnionType::Multi(types) => {
+                for ty in types {
+                    ty.visit_type(f);
+                }
+            }
+        }
+    }
 }
 
 impl LuaUnionType {
-    pub fn new(types: Vec<LuaType>) -> Self {
-        Self { types }
+    pub fn from_set(mut set: HashSet<LuaType>) -> Self {
+        let mut all_basic = true;
+        let mut basic_type = BasicTypeUnion::new();
+        for ty in &set {
+            if let Some(basic_kind) = BasicTypeKind::from_type(ty) {
+                basic_type.add(basic_kind);
+            } else {
+                all_basic = false;
+                break;
+            }
+        }
+
+        if all_basic {
+            return Self::Basic(basic_type);
+        }
+
+        if set.len() == 2 && set.contains(&LuaType::Nil) {
+            set.remove(&LuaType::Nil);
+            if let Some(first) = set.iter().next() {
+                return Self::Nullable(first.clone());
+            }
+            Self::Nullable(LuaType::Unknown)
+        } else {
+            Self::Multi(set.into_iter().collect())
+        }
     }
 
-    pub fn get_types(&self) -> &[LuaType] {
-        &self.types
+    pub fn from_vec(types: Vec<LuaType>) -> Self {
+        let mut all_basic = true;
+        let mut basic_type = BasicTypeUnion::new();
+        for ty in &types {
+            if let Some(basic_kind) = BasicTypeKind::from_type(ty) {
+                basic_type.add(basic_kind);
+            } else {
+                all_basic = false;
+                break;
+            }
+        }
+
+        if all_basic {
+            return Self::Basic(basic_type);
+        }
+
+        if types.len() == 2 {
+            if types.contains(&LuaType::Nil) {
+                let non_nil_type = types.iter().find(|t| !matches!(t, LuaType::Nil));
+                if let Some(ty) = non_nil_type {
+                    return Self::Nullable(ty.clone());
+                }
+            } else {
+                return Self::Multi(types);
+            }
+        }
+        Self::Multi(types)
     }
 
-    pub(crate) fn into_types(&self) -> Vec<LuaType> {
-        self.types.clone()
+    pub fn into_vec(&self) -> Vec<LuaType> {
+        match self {
+            LuaUnionType::Basic(basic) => basic.iter().collect(),
+            LuaUnionType::Nullable(ty) => vec![ty.clone(), LuaType::Nil],
+            LuaUnionType::Multi(types) => types.clone(),
+        }
+    }
+
+    #[allow(unused, clippy::wrong_self_convention)]
+    pub(crate) fn into_set(&self) -> HashSet<LuaType> {
+        match self {
+            LuaUnionType::Basic(basic) => basic.iter().collect(),
+            LuaUnionType::Nullable(ty) => {
+                let mut set = HashSet::new();
+                set.insert(ty.clone());
+                set.insert(LuaType::Nil);
+                set
+            }
+            LuaUnionType::Multi(types) => types.clone().into_iter().collect(),
+        }
     }
 
     pub fn contain_tpl(&self) -> bool {
-        self.types.iter().any(|t| t.contain_tpl())
+        match self {
+            LuaUnionType::Basic(_) => false,
+            LuaUnionType::Nullable(ty) => ty.contain_tpl(),
+            LuaUnionType::Multi(types) => types.iter().any(|t| t.contain_tpl()),
+        }
     }
-}
 
-impl PartialEq for LuaUnionType {
-    fn eq(&self, other: &Self) -> bool {
-        if self.types.len() != other.types.len() {
-            return false;
+    pub fn is_nullable(&self) -> bool {
+        match self {
+            LuaUnionType::Basic(basic) => basic.contains(BasicTypeKind::Nil),
+            LuaUnionType::Nullable(_) => true,
+            LuaUnionType::Multi(types) => types.iter().any(|t| t.is_nullable()),
         }
-        let mut counts = HashMap::new();
-        // Count occurrences in self.types
-        for t in &self.types {
-            *counts.entry(t).or_insert(0) += 1;
-        }
-        // Decrease counts for other.types
-        for t in &other.types {
-            match counts.get_mut(t) {
-                Some(count) if *count > 0 => *count -= 1,
-                _ => return false,
-            }
-        }
-        true
     }
-}
 
-impl Eq for LuaUnionType {}
-
-impl std::hash::Hash for LuaUnionType {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        // To get an order-insensitive hash, combine:
-        // - the number of elements
-        // - the sum and product of the hashes of individual elements.
-        // This is a simple and fast commutative hash.
-        let mut sum: u64 = 0;
-        let mut prod: u64 = 1;
-        for t in &self.types {
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            t.hash(&mut hasher);
-            let h = hasher.finish();
-            sum = sum.wrapping_add(h);
-            prod = prod.wrapping_mul(h.wrapping_add(1));
+    pub fn is_optional(&self) -> bool {
+        match self {
+            LuaUnionType::Basic(basic) => basic.contains(BasicTypeKind::Nil),
+            LuaUnionType::Nullable(_) => true,
+            LuaUnionType::Multi(types) => types.iter().any(|t| t.is_optional()),
         }
-        self.types.len().hash(state);
-        sum.hash(state);
-        prod.hash(state);
+    }
+
+    pub fn is_always_truthy(&self) -> bool {
+        match self {
+            LuaUnionType::Basic(basic) => basic.iter().all(|t| t.is_always_truthy()),
+            LuaUnionType::Nullable(_) => false,
+            LuaUnionType::Multi(types) => types.iter().all(|t| t.is_always_truthy()),
+        }
+    }
+
+    pub fn is_always_falsy(&self) -> bool {
+        match self {
+            LuaUnionType::Basic(basic) => basic.iter().all(|t| t.is_always_falsy()),
+            LuaUnionType::Nullable(f) => f.is_always_falsy(),
+            LuaUnionType::Multi(types) => types.iter().all(|t| t.is_always_falsy()),
+        }
     }
 }
 
@@ -781,9 +1122,42 @@ impl From<LuaUnionType> for LuaType {
     }
 }
 
+impl PartialEq for LuaUnionType {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (LuaUnionType::Basic(a), LuaUnionType::Basic(b)) => a == b,
+            (LuaUnionType::Nullable(a), LuaUnionType::Nullable(b)) => a == b,
+            (LuaUnionType::Multi(a), LuaUnionType::Multi(b)) => {
+                if a.len() != b.len() {
+                    return false;
+                }
+                let mut a_set: HashSet<_> = a.iter().collect();
+                for item in b {
+                    if !a_set.remove(item) {
+                        return false;
+                    }
+                }
+                a_set.is_empty()
+            }
+            _ => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct LuaIntersectionType {
     types: Vec<LuaType>,
+}
+
+impl TypeVisitTrait for LuaIntersectionType {
+    fn visit_type<F>(&self, f: &mut F)
+    where
+        F: FnMut(&LuaType),
+    {
+        for ty in &self.types {
+            ty.visit_type(f);
+        }
+    }
 }
 
 impl LuaIntersectionType {
@@ -795,6 +1169,7 @@ impl LuaIntersectionType {
         &self.types
     }
 
+    #[allow(clippy::wrong_self_convention)]
     pub(crate) fn into_types(&self) -> Vec<LuaType> {
         self.types.clone()
     }
@@ -820,12 +1195,24 @@ pub enum LuaAliasCallKind {
     Select,
     Unpack,
     RawGet,
+    Merge,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct LuaAliasCallType {
     call_kind: LuaAliasCallKind,
     operand: Vec<LuaType>,
+}
+
+impl TypeVisitTrait for LuaAliasCallType {
+    fn visit_type<F>(&self, f: &mut F)
+    where
+        F: FnMut(&LuaType),
+    {
+        for t in &self.operand {
+            t.visit_type(f);
+        }
+    }
 }
 
 impl LuaAliasCallType {
@@ -852,6 +1239,17 @@ pub struct LuaGenericType {
     params: Vec<LuaType>,
 }
 
+impl TypeVisitTrait for LuaGenericType {
+    fn visit_type<F>(&self, f: &mut F)
+    where
+        F: FnMut(&LuaType),
+    {
+        for param in &self.params {
+            param.visit_type(f);
+        }
+    }
+}
+
 impl LuaGenericType {
     pub fn new(base: LuaTypeDeclId, params: Vec<LuaType>) -> Self {
         Self { base, params }
@@ -863,6 +1261,10 @@ impl LuaGenericType {
 
     pub fn get_base_type_id(&self) -> LuaTypeDeclId {
         self.base.clone()
+    }
+
+    pub fn get_base_type_id_ref(&self) -> &LuaTypeDeclId {
+        &self.base
     }
 
     pub fn get_params(&self) -> &Vec<LuaType> {
@@ -884,6 +1286,22 @@ impl From<LuaGenericType> for LuaType {
 pub enum VariadicType {
     Multi(Vec<LuaType>),
     Base(LuaType),
+}
+
+impl TypeVisitTrait for VariadicType {
+    fn visit_type<F>(&self, f: &mut F)
+    where
+        F: FnMut(&LuaType),
+    {
+        match self {
+            VariadicType::Multi(types) => {
+                for ty in types {
+                    ty.visit_type(f);
+                }
+            }
+            VariadicType::Base(t) => t.visit_type(f),
+        }
+    }
 }
 
 impl VariadicType {
@@ -918,7 +1336,7 @@ impl VariadicType {
     pub fn get_new_variadic_from(&self, idx: usize) -> VariadicType {
         match self {
             VariadicType::Multi(types) => {
-                if types.len() == 0 {
+                if types.is_empty() {
                     return VariadicType::Multi(Vec::new());
                 }
 
@@ -988,31 +1406,19 @@ impl VariadicType {
     }
 }
 
-impl From<SmolStr> for LuaType {
-    fn from(s: SmolStr) -> Self {
-        let str: &str = s.as_ref();
-        match str {
-            "nil" => LuaType::Nil,
-            "table" => LuaType::Table,
-            "userdata" => LuaType::Userdata,
-            "function" => LuaType::Function,
-            "thread" => LuaType::Thread,
-            "boolean" => LuaType::Boolean,
-            "string" => LuaType::String,
-            "integer" => LuaType::Integer,
-            "number" => LuaType::Number,
-            "io" => LuaType::Io,
-            "global" => LuaType::Global,
-            "self" => LuaType::SelfInfer,
-            _ => LuaType::Ref(LuaTypeDeclId::new_by_id(s.into())),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct LuaInstanceType {
     base: LuaType,
     range: InFiled<TextRange>,
+}
+
+impl TypeVisitTrait for LuaInstanceType {
+    fn visit_type<F>(&self, f: &mut F)
+    where
+        F: FnMut(&LuaType),
+    {
+        self.base.visit_type(f);
+    }
 }
 
 impl LuaInstanceType {
@@ -1050,17 +1456,33 @@ impl GenericTplId {
     pub fn is_type(&self) -> bool {
         matches!(self, GenericTplId::Type(_))
     }
+
+    pub fn with_idx(&self, idx: u32) -> Self {
+        match self {
+            GenericTplId::Type(_) => GenericTplId::Type(idx),
+            GenericTplId::Func(_) => GenericTplId::Func(idx),
+        }
+    }
 }
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GenericTpl {
     tpl_id: GenericTplId,
     name: ArcIntern<SmolStr>,
+    constraint: Option<LuaType>,
 }
 
 impl GenericTpl {
-    pub fn new(tpl_id: GenericTplId, name: ArcIntern<SmolStr>) -> Self {
-        Self { tpl_id, name }
+    pub fn new(
+        tpl_id: GenericTplId,
+        name: ArcIntern<SmolStr>,
+        constraint: Option<LuaType>,
+    ) -> Self {
+        Self {
+            tpl_id,
+            name,
+            constraint,
+        }
     }
 
     pub fn get_tpl_id(&self) -> GenericTplId {
@@ -1070,23 +1492,35 @@ impl GenericTpl {
     pub fn get_name(&self) -> &str {
         &self.name
     }
+
+    pub fn get_constraint(&self) -> Option<&LuaType> {
+        self.constraint.as_ref()
+    }
 }
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LuaStringTplType {
     prefix: ArcIntern<String>,
     tpl_id: GenericTplId,
     name: ArcIntern<String>,
     suffix: ArcIntern<String>,
+    constraint: Option<LuaType>,
 }
 
 impl LuaStringTplType {
-    pub fn new(prefix: &str, name: &str, tpl_id: GenericTplId, suffix: &str) -> Self {
+    pub fn new(
+        prefix: &str,
+        name: &str,
+        tpl_id: GenericTplId,
+        suffix: &str,
+        constraint: Option<LuaType>,
+    ) -> Self {
         Self {
             prefix: ArcIntern::new(prefix.to_string()),
             tpl_id,
             name: ArcIntern::new(name.to_string()),
             suffix: ArcIntern::new(suffix.to_string()),
+            constraint,
         }
     }
 
@@ -1105,11 +1539,26 @@ impl LuaStringTplType {
     pub fn get_suffix(&self) -> &str {
         &self.suffix
     }
+
+    pub fn get_constraint(&self) -> Option<&LuaType> {
+        self.constraint.as_ref()
+    }
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct LuaMultiLineUnion {
     unions: Vec<(LuaType, Option<String>)>,
+}
+
+impl TypeVisitTrait for LuaMultiLineUnion {
+    fn visit_type<F>(&self, f: &mut F)
+    where
+        F: FnMut(&LuaType),
+    {
+        for (t, _) in &self.unions {
+            t.visit_type(f);
+        }
+    }
 }
 
 impl LuaMultiLineUnion {
@@ -1127,10 +1576,175 @@ impl LuaMultiLineUnion {
             types.push(t.clone());
         }
 
-        LuaType::Union(Arc::new(LuaUnionType::new(types)))
+        LuaType::Union(Arc::new(LuaUnionType::from_vec(types)))
     }
 
     pub fn contain_tpl(&self) -> bool {
         self.unions.iter().any(|(t, _)| t.contain_tpl())
+    }
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub struct LuaArrayType {
+    base: LuaType,
+    len: LuaArrayLen,
+}
+
+impl TypeVisitTrait for LuaArrayType {
+    fn visit_type<F>(&self, f: &mut F)
+    where
+        F: FnMut(&LuaType),
+    {
+        self.base.visit_type(f);
+    }
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub enum LuaArrayLen {
+    None,
+    Max(i64),
+}
+
+impl LuaArrayType {
+    pub fn new(base: LuaType, len: LuaArrayLen) -> Self {
+        Self { base, len }
+    }
+
+    pub fn from_base_type(base: LuaType) -> Self {
+        Self {
+            base,
+            len: LuaArrayLen::None,
+        }
+    }
+
+    pub fn get_base(&self) -> &LuaType {
+        &self.base
+    }
+
+    pub fn get_len(&self) -> &LuaArrayLen {
+        &self.len
+    }
+
+    pub fn contain_tpl(&self) -> bool {
+        self.base.contain_tpl()
+    }
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub struct LuaAttributeType {
+    params: Vec<(String, Option<LuaType>)>,
+}
+
+impl TypeVisitTrait for LuaAttributeType {
+    fn visit_type<F>(&self, f: &mut F)
+    where
+        F: FnMut(&LuaType),
+    {
+        for (_, t) in &self.params {
+            if let Some(t) = t {
+                t.visit_type(f);
+            }
+        }
+    }
+}
+
+impl LuaAttributeType {
+    pub fn new(params: Vec<(String, Option<LuaType>)>) -> Self {
+        Self { params }
+    }
+
+    pub fn get_params(&self) -> &[(String, Option<LuaType>)] {
+        &self.params
+    }
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub struct LuaConditionalType {
+    condition: LuaType,
+    true_type: LuaType,
+    false_type: LuaType,
+    /// infer 参数声明, 这些参数只在 true_type 的作用域内可见
+    infer_params: Vec<GenericParam>,
+    pub has_new: bool,
+}
+
+impl TypeVisitTrait for LuaConditionalType {
+    fn visit_type<F>(&self, f: &mut F)
+    where
+        F: FnMut(&LuaType),
+    {
+        self.condition.visit_type(f);
+        self.true_type.visit_type(f);
+        self.false_type.visit_type(f);
+    }
+}
+
+impl LuaConditionalType {
+    pub fn new(
+        condition: LuaType,
+        true_type: LuaType,
+        false_type: LuaType,
+        infer_params: Vec<GenericParam>,
+        has_new: bool,
+    ) -> Self {
+        Self {
+            condition,
+            true_type,
+            false_type,
+            infer_params,
+            has_new,
+        }
+    }
+
+    pub fn get_condition(&self) -> &LuaType {
+        &self.condition
+    }
+
+    pub fn get_true_type(&self) -> &LuaType {
+        &self.true_type
+    }
+
+    pub fn get_false_type(&self) -> &LuaType {
+        &self.false_type
+    }
+
+    pub fn get_infer_params(&self) -> &[GenericParam] {
+        &self.infer_params
+    }
+
+    pub fn contain_tpl(&self) -> bool {
+        self.condition.contain_tpl()
+            || self.true_type.contain_tpl()
+            || self.false_type.contain_tpl()
+    }
+}
+
+impl From<LuaConditionalType> for LuaType {
+    fn from(t: LuaConditionalType) -> Self {
+        LuaType::Conditional(Arc::new(t))
+    }
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub struct LuaMappedType {
+    pub param: (GenericTplId, GenericParam),
+    pub value: LuaType,
+    pub is_readonly: bool,
+    pub is_optional: bool,
+}
+
+impl LuaMappedType {
+    pub fn new(
+        param: (GenericTplId, GenericParam),
+        value: LuaType,
+        is_readonly: bool,
+        is_optional: bool,
+    ) -> Self {
+        Self {
+            param,
+            value,
+            is_readonly,
+            is_optional,
+        }
     }
 }

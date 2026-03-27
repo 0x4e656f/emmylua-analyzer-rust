@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::{parser::ParserConfig, LuaLanguageLevel, LuaParser};
+    use crate::{LuaLanguageLevel, LuaParser, parser::ParserConfig};
 
     macro_rules! assert_ast_eq {
         ($lua_code:expr, $expected:expr) => {
@@ -20,6 +20,13 @@ mod tests {
     #[allow(unused)]
     fn print_ast(lua_code: &str) {
         let tree = LuaParser::parse(lua_code, ParserConfig::default());
+        println!("{:#?}", tree.get_red_root());
+    }
+
+    #[allow(unused)]
+    fn print_ast_level(lua_code: &str, level: LuaLanguageLevel) {
+        let config = ParserConfig::new(level, None, Default::default(), Default::default(), false);
+        let tree = LuaParser::parse(lua_code, config);
         println!("{:#?}", tree.get_red_root());
     }
 
@@ -75,9 +82,9 @@ Syntax(Chunk)@0..770
     Token(TkEndOfLine)@0..1 "\n"
     Token(TkWhitespace)@1..13 "            "
     Syntax(Comment)@13..33
-      Token(TkNormalStart)@13..15 "--"
-      Token(TkWhitespace)@15..16 " "
-      Syntax(DocDescription)@16..33
+      Syntax(DocDescription)@13..33
+        Token(TkNormalStart)@13..15 "--"
+        Token(TkWhitespace)@15..16 " "
         Token(TkDocDetail)@16..33 "This is a comment"
     Token(TkEndOfLine)@33..34 "\n"
     Token(TkWhitespace)@34..46 "            "
@@ -1137,16 +1144,48 @@ Syntax(Chunk)@0..12
     Syntax(GlobalStat)@0..12
       Token(TkGlobal)@0..6 "global"
       Token(TkWhitespace)@6..7 " "
-      Token(TkName)@7..8 "a"
+      Syntax(LocalName)@7..8
+        Token(TkName)@7..8 "a"
       Token(TkComma)@8..9 ","
       Token(TkWhitespace)@9..10 " "
-      Token(TkName)@10..11 "b"
+      Syntax(LocalName)@10..11
+        Token(TkName)@10..11 "b"
       Token(TkSemicolon)@11..12 ";"
         "#;
 
         assert_ast_eq!(
             code,
             result,
+            ParserConfig::with_level(LuaLanguageLevel::Lua55)
+        );
+
+        let code2 = "global <const> a, b<const>";
+        let result2 = r#"
+Syntax(Chunk)@0..26
+  Syntax(Block)@0..26
+    Syntax(GlobalStat)@0..26
+      Token(TkGlobal)@0..6 "global"
+      Token(TkWhitespace)@6..7 " "
+      Syntax(Attribute)@7..14
+        Token(TkLt)@7..8 "<"
+        Token(TkName)@8..13 "const"
+        Token(TkGt)@13..14 ">"
+      Token(TkWhitespace)@14..15 " "
+      Syntax(LocalName)@15..16
+        Token(TkName)@15..16 "a"
+      Token(TkComma)@16..17 ","
+      Token(TkWhitespace)@17..18 " "
+      Syntax(LocalName)@18..26
+        Token(TkName)@18..19 "b"
+        Syntax(Attribute)@19..26
+          Token(TkLt)@19..20 "<"
+          Token(TkName)@20..25 "const"
+          Token(TkGt)@25..26 ">"
+        "#;
+
+        assert_ast_eq!(
+            code2,
+            result2,
             ParserConfig::with_level(LuaLanguageLevel::Lua55)
         );
     }
@@ -1207,5 +1246,118 @@ Syntax(Chunk)@0..94
         "#;
 
         assert_ast_eq!(code, result);
+    }
+
+    #[test]
+    fn test_lua55_local_grammar() {
+        let code = "local <const> a, b<const> = 1, 2";
+        let result = r#"
+Syntax(Chunk)@0..32
+  Syntax(Block)@0..32
+    Syntax(LocalStat)@0..32
+      Token(TkLocal)@0..5 "local"
+      Token(TkWhitespace)@5..6 " "
+      Syntax(Attribute)@6..13
+        Token(TkLt)@6..7 "<"
+        Token(TkName)@7..12 "const"
+        Token(TkGt)@12..13 ">"
+      Token(TkWhitespace)@13..14 " "
+      Syntax(LocalName)@14..15
+        Token(TkName)@14..15 "a"
+      Token(TkComma)@15..16 ","
+      Token(TkWhitespace)@16..17 " "
+      Syntax(LocalName)@17..25
+        Token(TkName)@17..18 "b"
+        Syntax(Attribute)@18..25
+          Token(TkLt)@18..19 "<"
+          Token(TkName)@19..24 "const"
+          Token(TkGt)@24..25 ">"
+      Token(TkWhitespace)@25..26 " "
+      Token(TkAssign)@26..27 "="
+      Token(TkWhitespace)@27..28 " "
+      Syntax(LiteralExpr)@28..29
+        Token(TkInt)@28..29 "1"
+      Token(TkComma)@29..30 ","
+      Token(TkWhitespace)@30..31 " "
+      Syntax(LiteralExpr)@31..32
+        Token(TkInt)@31..32 "2"
+        "#;
+
+        assert_ast_eq!(
+            code,
+            result,
+            ParserConfig::with_level(LuaLanguageLevel::Lua55)
+        );
+    }
+
+    #[test]
+    fn test_lua55_named_var_args_grammar() {
+        let code = r#"
+        local function foo(a, b, ...c)
+        end
+        "#;
+        let result = r#"
+Syntax(Chunk)@0..60
+  Syntax(Block)@0..60
+    Token(TkEndOfLine)@0..1 "\n"
+    Token(TkWhitespace)@1..9 "        "
+    Syntax(LocalFuncStat)@9..51
+      Token(TkLocal)@9..14 "local"
+      Token(TkWhitespace)@14..15 " "
+      Token(TkFunction)@15..23 "function"
+      Token(TkWhitespace)@23..24 " "
+      Syntax(LocalName)@24..27
+        Token(TkName)@24..27 "foo"
+      Syntax(ClosureExpr)@27..51
+        Syntax(ParamList)@27..39
+          Token(TkLeftParen)@27..28 "("
+          Syntax(ParamName)@28..29
+            Token(TkName)@28..29 "a"
+          Token(TkComma)@29..30 ","
+          Token(TkWhitespace)@30..31 " "
+          Syntax(ParamName)@31..32
+            Token(TkName)@31..32 "b"
+          Token(TkComma)@32..33 ","
+          Token(TkWhitespace)@33..34 " "
+          Syntax(ParamName)@34..38
+            Token(TkDots)@34..37 "..."
+            Token(TkName)@37..38 "c"
+          Token(TkRightParen)@38..39 ")"
+        Token(TkEndOfLine)@39..40 "\n"
+        Token(TkWhitespace)@40..48 "        "
+        Token(TkEnd)@48..51 "end"
+    Token(TkEndOfLine)@51..52 "\n"
+    Token(TkWhitespace)@52..60 "        "
+        "#;
+
+        assert_ast_eq!(
+            code,
+            result,
+            ParserConfig::with_level(LuaLanguageLevel::Lua55)
+        );
+    }
+
+    #[test]
+    fn test_global_const_mul() {
+        let code = "global <const> *";
+        let result = r#"
+Syntax(Chunk)@0..16
+  Syntax(Block)@0..16
+    Syntax(GlobalStat)@0..16
+      Token(TkGlobal)@0..6 "global"
+      Token(TkWhitespace)@6..7 " "
+      Syntax(Attribute)@7..14
+        Token(TkLt)@7..8 "<"
+        Token(TkName)@8..13 "const"
+        Token(TkGt)@13..14 ">"
+      Token(TkWhitespace)@14..15 " "
+      Token(TkMul)@15..16 "*"
+        "#;
+
+        assert_ast_eq!(
+            code,
+            result,
+            ParserConfig::with_level(LuaLanguageLevel::Lua55)
+        );
     }
 }

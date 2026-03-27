@@ -1,21 +1,24 @@
 mod infer_binary;
 mod infer_call;
+mod infer_doc_type;
 mod infer_fail_reason;
 mod infer_index;
 mod infer_name;
 mod infer_table;
 mod infer_unary;
+mod narrow;
 mod test;
 
 use std::ops::Deref;
 
 use emmylua_parser::{
     LuaAst, LuaAstNode, LuaCallExpr, LuaClosureExpr, LuaExpr, LuaLiteralExpr, LuaLiteralToken,
-    LuaTableExpr, LuaVarExpr,
+    LuaTableExpr, LuaVarExpr, NumberResult,
 };
 use infer_binary::infer_binary_expr;
 use infer_call::infer_call_expr;
 pub use infer_call::infer_call_expr_func;
+pub use infer_doc_type::{DocTypeInferContext, infer_doc_type};
 pub use infer_fail_reason::InferFailReason;
 pub use infer_index::infer_index_expr;
 use infer_name::infer_name_expr;
@@ -23,29 +26,29 @@ pub use infer_name::{find_self_decl_or_member_id, infer_param};
 use infer_table::infer_table_expr;
 pub use infer_table::{infer_table_field_value_should_be, infer_table_should_be};
 use infer_unary::infer_unary_expr;
+pub use narrow::VarRefId;
 
 use rowan::TextRange;
 use smol_str::SmolStr;
 
 use crate::{
-    db_index::{DbIndex, LuaOperator, LuaOperatorMetaMethod, LuaSignatureId, LuaType},
     InFiled, InferGuard, LuaMemberKey, VariadicType,
+    db_index::{DbIndex, LuaOperator, LuaOperatorMetaMethod, LuaSignatureId, LuaType},
 };
 
-use super::{member::infer_raw_member_type, CacheEntry, CacheKey, LuaInferCache};
+use super::{CacheEntry, LuaInferCache, member::infer_raw_member_type};
 
 pub type InferResult = Result<LuaType, InferFailReason>;
 pub use infer_call::InferCallFuncResult;
 
 pub fn infer_expr(db: &DbIndex, cache: &mut LuaInferCache, expr: LuaExpr) -> InferResult {
     let syntax_id = expr.get_syntax_id();
-    let key = CacheKey::Expr(syntax_id);
-    match cache.get(&key) {
-        Some(cache) => match cache {
-            CacheEntry::ExprCache(ty) => return Ok(ty.clone()),
+    let key = syntax_id;
+    if let Some(cache) = cache.expr_cache.get(&key) {
+        match cache {
+            CacheEntry::Cache(ty) => return Ok(ty.clone()),
             _ => return Err(InferFailReason::RecursiveInfer),
-        },
-        None => {}
+        }
     }
 
     // for @as
@@ -55,14 +58,13 @@ pub fn infer_expr(db: &DbIndex, cache: &mut LuaInferCache, expr: LuaExpr) -> Inf
         .get_type_index()
         .get_type_cache(&in_filed_syntax_id.into())
     {
-        cache.add_cache(
-            &key,
-            CacheEntry::ExprCache(bind_type_cache.as_type().clone()),
-        );
+        cache
+            .expr_cache
+            .insert(key, CacheEntry::Cache(bind_type_cache.as_type().clone()));
         return Ok(bind_type_cache.as_type().clone());
     }
 
-    cache.ready_cache(&key);
+    cache.expr_cache.insert(key, CacheEntry::Ready);
     let result_type = match expr {
         LuaExpr::CallExpr(call_expr) => infer_call_expr(db, cache, call_expr),
         LuaExpr::TableExpr(table_expr) => infer_table_expr(db, cache, table_expr),
@@ -80,21 +82,29 @@ pub fn infer_expr(db: &DbIndex, cache: &mut LuaInferCache, expr: LuaExpr) -> Inf
     };
 
     match &result_type {
-        Ok(result_type) => cache.add_cache(&key, CacheEntry::ExprCache(result_type.clone())),
+        Ok(result_type) => {
+            cache
+                .expr_cache
+                .insert(key, CacheEntry::Cache(result_type.clone()));
+        }
         Err(InferFailReason::None) | Err(InferFailReason::RecursiveInfer) => {
-            cache.add_cache(&key, CacheEntry::ExprCache(LuaType::Unknown));
+            cache
+                .expr_cache
+                .insert(key, CacheEntry::Cache(LuaType::Unknown));
             return Ok(LuaType::Unknown);
         }
         Err(InferFailReason::FieldNotFound) => {
             if cache.get_config().analysis_phase.is_force() {
-                cache.add_cache(&key, CacheEntry::ExprCache(LuaType::Nil));
+                cache
+                    .expr_cache
+                    .insert(key, CacheEntry::Cache(LuaType::Nil));
                 return Ok(LuaType::Nil);
             } else {
-                cache.ready_cache(&key);
+                cache.expr_cache.remove(&key);
             }
         }
         _ => {
-            cache.remove(&key);
+            cache.expr_cache.remove(&key);
         }
     }
 
@@ -105,15 +115,11 @@ fn infer_literal_expr(db: &DbIndex, config: &LuaInferCache, expr: LuaLiteralExpr
     match expr.get_literal().ok_or(InferFailReason::None)? {
         LuaLiteralToken::Nil(_) => Ok(LuaType::Nil),
         LuaLiteralToken::Bool(bool) => Ok(LuaType::BooleanConst(bool.is_true())),
-        LuaLiteralToken::Number(num) => {
-            if num.is_int() {
-                Ok(LuaType::IntegerConst(num.get_int_value()))
-            } else if num.is_float() {
-                Ok(LuaType::FloatConst(num.get_float_value()))
-            } else {
-                Ok(LuaType::Number)
-            }
-        }
+        LuaLiteralToken::Number(num) => match num.get_number_value() {
+            NumberResult::Int(i) => Ok(LuaType::IntegerConst(i)),
+            NumberResult::Float(f) => Ok(LuaType::FloatConst(f)),
+            _ => Ok(LuaType::Number),
+        },
         LuaLiteralToken::String(str) => {
             Ok(LuaType::StringConst(SmolStr::new(str.get_value()).into()))
         }
@@ -132,7 +138,7 @@ fn infer_literal_expr(db: &DbIndex, config: &LuaInferCache, expr: LuaLiteralExpr
                     let base = infer_param(db, decl).unwrap_or(LuaType::Unknown);
                     LuaType::Variadic(VariadicType::Base(base).into())
                 }
-                _ => LuaType::Any, // 默认返回 Any
+                _ => LuaType::Variadic(VariadicType::Base(LuaType::Any).into()),
             };
 
             Ok(decl_type)
@@ -170,47 +176,87 @@ fn get_custom_type_operator(
     }
 }
 
-pub fn infer_expr_list_types(
+pub fn infer_expr_list_value_type_at(
+    db: &DbIndex,
+    cache: &mut LuaInferCache,
+    exprs: &[LuaExpr],
+    value_idx: usize,
+) -> Result<Option<LuaType>, InferFailReason> {
+    let exprs_len = exprs.len();
+    if exprs_len == 0 {
+        Ok(None)
+    } else if value_idx < exprs_len {
+        Ok(
+            infer_expr_list_types(db, cache, &exprs[value_idx..], Some(1), infer_expr)?
+                .first()
+                .map(|(ty, _)| ty.clone()),
+        )
+    } else {
+        let last_idx = exprs_len - 1;
+        let offset = value_idx - last_idx;
+        Ok(
+            infer_expr_list_types(db, cache, &exprs[last_idx..], Some(offset + 1), infer_expr)?
+                .get(offset)
+                .map(|(ty, _)| ty.clone()),
+        )
+    }
+}
+
+pub fn infer_expr_list_types<F>(
     db: &DbIndex,
     cache: &mut LuaInferCache,
     exprs: &[LuaExpr],
     var_count: Option<usize>,
-) -> Vec<(LuaType, TextRange)> {
+    mut infer: F,
+) -> Result<Vec<(LuaType, TextRange)>, InferFailReason>
+where
+    F: FnMut(&DbIndex, &mut LuaInferCache, LuaExpr) -> InferResult,
+{
     let mut value_types = Vec::new();
     for (idx, expr) in exprs.iter().enumerate() {
-        let expr_type = infer_expr(db, cache, expr.clone()).unwrap_or(LuaType::Unknown);
+        if let Some(var_count) = var_count
+            && value_types.len() >= var_count
+        {
+            break;
+        }
+
+        let expr_type = infer(db, cache, expr.clone())?;
+        if let Some(var_count) = var_count
+            && expr_type.contain_multi_return()
+        {
+            if idx < var_count {
+                for i in idx..var_count {
+                    if let Some(typ) = expr_type.get_result_slot_type(i - idx) {
+                        value_types.push((typ, expr.get_range()));
+                    } else {
+                        break;
+                    }
+                }
+            }
+
+            break;
+        }
+
         match expr_type {
             LuaType::Variadic(variadic) => {
-                if let Some(var_count) = var_count {
-                    if idx < var_count {
-                        for i in idx..var_count {
-                            if let Some(typ) = variadic.get_type(i - idx) {
-                                value_types.push((typ.clone(), expr.get_range()));
-                            } else {
-                                break;
-                            }
-                        }
+                match variadic.deref() {
+                    VariadicType::Base(base) => {
+                        value_types.push((base.clone(), expr.get_range()));
                     }
-                } else {
-                    match variadic.deref() {
-                        VariadicType::Base(base) => {
-                            value_types.push((base.clone(), expr.get_range()));
-                        }
-                        VariadicType::Multi(vecs) => {
-                            for typ in vecs {
-                                value_types.push((typ.clone(), expr.get_range()));
-                            }
+                    VariadicType::Multi(vecs) => {
+                        for typ in vecs {
+                            value_types.push((typ.clone(), expr.get_range()));
                         }
                     }
                 }
 
                 break;
             }
-            _ => value_types.push((expr_type.clone(), expr.get_range())),
+            _ => value_types.push((expr_type, expr.get_range())),
         }
     }
 
-    value_types
+    Ok(value_types)
 }
 
 /// 推断值已经绑定的类型(不是推断值的类型). 例如从右值推断左值类型, 从调用参数推断函数参数类型参数类型
@@ -219,8 +265,9 @@ pub fn infer_bind_value_type(
     cache: &mut LuaInferCache,
     expr: LuaExpr,
 ) -> Option<LuaType> {
-    let parent_node = expr.syntax().parent().map(LuaAst::cast).flatten()?;
-    let typ = match parent_node {
+    let parent_node = expr.syntax().parent().and_then(LuaAst::cast)?;
+
+    match parent_node {
         LuaAst::LuaAssignStat(assign) => {
             let (vars, exprs) = assign.get_var_and_expr_list();
             let mut typ = None;
@@ -228,19 +275,13 @@ pub fn infer_bind_value_type(
                 if expr == *assign_expr {
                     let var = vars.get(idx);
                     if let Some(var) = var {
-                        match var {
-                            LuaVarExpr::IndexExpr(index_expr) => {
-                                let prefix_expr = index_expr.get_prefix_expr()?;
-                                let prefix_type = infer_expr(db, cache, prefix_expr).ok()?;
-                                // 如果前缀类型是定义类型, 则不认为存在左值绑定
-                                match prefix_type {
-                                    LuaType::Def(_) => {
-                                        return None;
-                                    }
-                                    _ => {}
-                                }
+                        if let LuaVarExpr::IndexExpr(index_expr) = var {
+                            let prefix_expr = index_expr.get_prefix_expr()?;
+                            let prefix_type = infer_expr(db, cache, prefix_expr).ok()?;
+                            // 如果前缀类型是定义类型, 则不认为存在左值绑定
+                            if let LuaType::Def(_) = prefix_type {
+                                return None;
                             }
-                            _ => {}
                         };
                         typ = Some(infer_expr(db, cache, var.clone().into()).ok()?);
                         break;
@@ -281,7 +322,7 @@ pub fn infer_bind_value_type(
                 cache,
                 call_expr,
                 expr_type.clone(),
-                &mut InferGuard::new(),
+                &InferGuard::new(),
                 None,
             )
             .ok()?;
@@ -300,10 +341,8 @@ pub fn infer_bind_value_type(
             }
 
             let param_info = func_type.get_params().get(param_pos)?;
-            return param_info.1.clone();
+            param_info.1.clone()
         }
         _ => None,
-    };
-
-    typ
+    }
 }

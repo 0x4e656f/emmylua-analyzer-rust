@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod test {
+    use std::collections::HashSet;
     use std::sync::Arc;
 
     use crate::{LuaType, LuaUnionType, VirtualWorkspace};
@@ -105,6 +106,69 @@ mod test {
     }
 
     #[test]
+    fn test_enum_key_pairs() {
+        let mut ws = VirtualWorkspace::new_with_init_std_lib();
+
+        ws.def(
+            r#"
+            --- @enum Severity
+            local severity = {
+                ERROR = 1,
+                WARN = 2,
+                INFO = 3,
+                HINT = 4,
+            }
+
+            local severities = {
+                [severity.ERROR] = 1,
+                [severity.WARN] = 2,
+                [severity.INFO] = 3,
+                [severity.HINT] = 4,
+            }
+
+            for k in pairs(severities) do
+                key = k
+            end
+        "#,
+        );
+
+        let key_ty = ws.expr_ty("key");
+        let LuaType::Union(union) = key_ty else {
+            panic!("expected enum key union, got {:?}", key_ty);
+        };
+        let set = union.into_set();
+        let expected: HashSet<_> = vec![
+            LuaType::IntegerConst(1),
+            LuaType::IntegerConst(2),
+            LuaType::IntegerConst(3),
+            LuaType::IntegerConst(4),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(set, expected);
+    }
+
+    #[test]
+    fn test_pairs_expr_key_type() {
+        let mut ws = VirtualWorkspace::new_with_init_std_lib();
+
+        ws.def(
+            r#"
+            local key = tostring(1)
+            local t = {
+                [key] = 1,
+            }
+
+            for k in pairs(t) do
+                key_out = k
+            end
+        "#,
+        );
+
+        assert_eq!(ws.expr_ty("key_out"), LuaType::String);
+    }
+
+    #[test]
     fn test_issue_291() {
         let mut ws = VirtualWorkspace::new_with_init_std_lib();
 
@@ -144,10 +208,10 @@ mod test {
 
         assert_eq!(
             ws.expr_ty("d"),
-            LuaType::Union(Arc::new(LuaUnionType::new(vec![
+            LuaType::Union(Arc::new(LuaUnionType::from_vec(vec![
                 LuaType::String,
-                LuaType::Number,
-            ])))
+                LuaType::Number
+            ]))),
         );
     }
 }

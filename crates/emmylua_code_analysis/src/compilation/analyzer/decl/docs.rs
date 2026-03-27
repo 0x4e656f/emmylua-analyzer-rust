@@ -1,13 +1,14 @@
 use emmylua_parser::{
-    LuaAstNode, LuaAstToken, LuaComment, LuaDocAttribute, LuaDocTag, LuaDocTagAlias,
+    LuaAstNode, LuaAstToken, LuaComment, LuaDocTag, LuaDocTagAlias, LuaDocTagAttribute,
     LuaDocTagClass, LuaDocTagEnum, LuaDocTagMeta, LuaDocTagNamespace, LuaDocTagUsing,
+    LuaDocTypeFlag,
 };
 use flagset::FlagSet;
 use rowan::TextRange;
 
 use crate::{
-    db_index::{LuaDeclTypeKind, LuaTypeAttribute},
     LuaTypeDecl, LuaTypeDeclId,
+    db_index::{LuaDeclTypeKind, LuaTypeFlag},
 };
 
 use super::DeclAnalyzer;
@@ -16,39 +17,39 @@ pub fn analyze_doc_tag_class(analyzer: &mut DeclAnalyzer, class: LuaDocTagClass)
     let name_token = class.get_name_token()?;
     let name = name_token.get_name_text().to_string();
     let range = name_token.syntax().text_range();
-    let attrib = get_attrib_value(analyzer, class.get_attrib());
+    let type_flag = get_type_flag_value(analyzer, class.get_type_flag());
 
-    add_type_decl(analyzer, &name, range, LuaDeclTypeKind::Class, attrib);
+    add_type_decl(analyzer, &name, range, LuaDeclTypeKind::Class, type_flag);
     Some(())
 }
 
-fn get_attrib_value(
+fn get_type_flag_value(
     analyzer: &mut DeclAnalyzer,
-    attrib: Option<LuaDocAttribute>,
-) -> FlagSet<LuaTypeAttribute> {
-    let mut attr: FlagSet<LuaTypeAttribute> = if analyzer.is_meta {
-        LuaTypeAttribute::Meta.into()
+    flag: Option<LuaDocTypeFlag>,
+) -> FlagSet<LuaTypeFlag> {
+    let mut attr: FlagSet<LuaTypeFlag> = if analyzer.is_meta {
+        LuaTypeFlag::Meta.into()
     } else {
-        LuaTypeAttribute::None.into()
+        LuaTypeFlag::None.into()
     };
 
-    if let Some(attrib) = attrib {
-        for token in attrib.get_attrib_tokens() {
+    if let Some(flag) = flag {
+        for token in flag.get_attrib_tokens() {
             match token.get_name_text() {
                 "partial" => {
-                    attr |= LuaTypeAttribute::Partial;
+                    attr |= LuaTypeFlag::Partial;
                 }
                 "key" => {
-                    attr |= LuaTypeAttribute::Key;
+                    attr |= LuaTypeFlag::Key;
                 }
-                // "global" => {
-                //     attr |= LuaTypeAttribute::Global;
-                // }
                 "exact" => {
-                    attr |= LuaTypeAttribute::Exact;
+                    attr |= LuaTypeFlag::Exact;
                 }
                 "constructor" => {
-                    attr |= LuaTypeAttribute::Constructor;
+                    attr |= LuaTypeFlag::Constructor;
+                }
+                "private" => {
+                    attr |= LuaTypeFlag::Private;
                 }
                 _ => {}
             }
@@ -62,9 +63,9 @@ pub fn analyze_doc_tag_enum(analyzer: &mut DeclAnalyzer, enum_: LuaDocTagEnum) -
     let name_token = enum_.get_name_token()?;
     let name = name_token.get_name_text().to_string();
     let range = name_token.syntax().text_range();
-    let attrib = get_attrib_value(analyzer, enum_.get_attrib());
+    let flag = get_type_flag_value(analyzer, enum_.get_type_flag());
 
-    add_type_decl(analyzer, &name, range, LuaDeclTypeKind::Enum, attrib);
+    add_type_decl(analyzer, &name, range, LuaDeclTypeKind::Enum, flag);
     Some(())
 }
 
@@ -72,13 +73,25 @@ pub fn analyze_doc_tag_alias(analyzer: &mut DeclAnalyzer, alias: LuaDocTagAlias)
     let name_token = alias.get_name_token()?;
     let name = name_token.get_name_text().to_string();
     let range = name_token.syntax().text_range();
+    let type_flag = get_type_flag_value(analyzer, alias.get_type_flag());
+    add_type_decl(analyzer, &name, range, LuaDeclTypeKind::Alias, type_flag);
+    Some(())
+}
+
+pub fn analyze_doc_tag_attribute(
+    analyzer: &mut DeclAnalyzer,
+    attribute: LuaDocTagAttribute,
+) -> Option<()> {
+    let name_token = attribute.get_name_token()?;
+    let name = name_token.get_name_text().to_string();
+    let range = name_token.syntax().text_range();
 
     add_type_decl(
         analyzer,
         &name,
         range,
-        LuaDeclTypeKind::Alias,
-        LuaTypeAttribute::None.into(),
+        LuaDeclTypeKind::Attribute,
+        LuaTypeFlag::None.into(),
     );
     Some(())
 }
@@ -114,6 +127,7 @@ pub fn analyze_doc_tag_meta(analyzer: &mut DeclAnalyzer, tag: LuaDocTagMeta) -> 
     let file_id = analyzer.get_file_id();
     analyzer.db.get_module_index_mut().set_meta(file_id);
     analyzer.is_meta = true;
+    analyzer.context.add_meta(file_id);
 
     if let Some(name_token) = tag.get_name_token() {
         let text = name_token.get_name_text();
@@ -166,7 +180,7 @@ fn add_type_decl(
     name: &str,
     range: TextRange,
     kind: LuaDeclTypeKind,
-    attrib: FlagSet<LuaTypeAttribute>,
+    flag: FlagSet<LuaTypeFlag>,
 ) {
     let file_id = analyzer.get_file_id();
     let type_index = analyzer.db.get_type_index_mut();
@@ -176,10 +190,14 @@ fn add_type_decl(
     let full_name = option_namespace
         .map(|ns| format!("{}.{}", ns, basic_name))
         .unwrap_or(basic_name.to_string());
-    let id = LuaTypeDeclId::new(&full_name);
+    let id = if flag.contains(LuaTypeFlag::Private) {
+        LuaTypeDeclId::local(file_id, &full_name)
+    } else {
+        LuaTypeDeclId::global(&full_name)
+    };
     let simple_name = id.get_simple_name();
     type_index.add_type_decl(
         file_id,
-        LuaTypeDecl::new(file_id, range, simple_name.to_string(), kind, attrib, id),
+        LuaTypeDecl::new(file_id, range, simple_name.to_string(), kind, flag, id),
     );
 }

@@ -3,7 +3,8 @@ mod add_member_completion;
 mod check_match_word;
 
 pub use add_decl_completion::add_decl_completion;
-pub use add_member_completion::{add_member_completion, CompletionTriggerStatus};
+pub use add_member_completion::get_index_alias_name;
+pub use add_member_completion::{CompletionTriggerStatus, add_member_completion};
 pub use check_match_word::check_match_word;
 use emmylua_code_analysis::{LuaSemanticDeclId, LuaType, RenderLevel};
 use lsp_types::CompletionItemKind;
@@ -29,7 +30,7 @@ pub fn check_visibility(builder: &mut CompletionBuilder, id: LuaSemanticDeclId) 
     Some(())
 }
 
-fn get_completion_kind(typ: &LuaType) -> CompletionItemKind {
+pub fn get_completion_kind(typ: &LuaType) -> CompletionItemKind {
     if typ.is_function() {
         return CompletionItemKind::FUNCTION;
     } else if typ.is_const() {
@@ -50,10 +51,10 @@ pub fn is_deprecated(builder: &CompletionBuilder, id: LuaSemanticDeclId) -> bool
         .get_property_index()
         .get_property(&id);
 
-    if let Some(property) = property {
-        if property.deprecated.is_some() {
-            return true;
-        }
+    if let Some(property) = property
+        && property.deprecated().is_some()
+    {
+        return true;
     }
 
     false
@@ -77,7 +78,7 @@ pub fn get_detail(
                 .semantic_model
                 .get_db()
                 .get_signature_index()
-                .get(&signature_id)?;
+                .get(signature_id)?;
 
             let mut params_str = signature
                 .get_type_params()
@@ -141,13 +142,90 @@ pub fn get_detail(
                 _ => {
                     let type_detail = humanize_type(
                         builder.semantic_model.get_db(),
-                        &ret_type,
+                        ret_type,
                         RenderLevel::Minimal,
                     );
                     format!("-> {}", type_detail)
                 }
             };
             Some(format!("({}){}", params_str.join(", "), rets_detail))
+        }
+        _ => None,
+    }
+}
+
+pub fn get_function_snippet(
+    builder: &CompletionBuilder,
+    label: &str,
+    typ: &LuaType,
+    display: CallDisplay,
+) -> Option<String> {
+    match typ {
+        LuaType::Signature(signature_id) => {
+            let signature = builder
+                .semantic_model
+                .get_db()
+                .get_signature_index()
+                .get(signature_id)?;
+
+            let mut params_str = signature
+                .get_type_params()
+                .iter()
+                .map(|param| param.0.clone())
+                .collect::<Vec<_>>();
+
+            match display {
+                CallDisplay::AddSelf => {
+                    params_str.insert(0, "self".to_string());
+                }
+                CallDisplay::RemoveFirst => {
+                    if !params_str.is_empty() {
+                        params_str.remove(0);
+                    }
+                }
+                _ => {}
+            }
+
+            Some(format!(
+                "{}({})",
+                label,
+                params_str
+                    .iter()
+                    .enumerate()
+                    .map(|(i, name)| format!("${{{}:{}}}", i + 1, name))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        }
+        LuaType::DocFunction(f) => {
+            let mut params_str = f
+                .get_params()
+                .iter()
+                .map(|param| param.0.clone())
+                .collect::<Vec<_>>();
+
+            match display {
+                CallDisplay::AddSelf => {
+                    params_str.insert(0, "self".to_string());
+                }
+                CallDisplay::RemoveFirst => {
+                    if !params_str.is_empty() {
+                        params_str.remove(0);
+                    }
+                }
+                _ => {}
+            }
+
+            Some(format!(
+                "{}({})",
+                label,
+                params_str
+                    .iter()
+                    .enumerate()
+                    .map(|(i, name)| format!("${{{}:{}}}", i + 1, name))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
         }
         _ => None,
     }

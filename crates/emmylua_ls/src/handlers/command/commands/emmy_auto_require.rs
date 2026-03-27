@@ -5,10 +5,7 @@ use emmylua_parser::{LuaAstNode, LuaExpr, LuaStat};
 use lsp_types::{ApplyWorkspaceEditParams, Command, Position, TextEdit, WorkspaceEdit};
 use serde_json::Value;
 
-use crate::{
-    context::ServerContextSnapshot,
-    util::{module_name_convert, time_cancel_token},
-};
+use crate::{context::ServerContextSnapshot, util::time_cancel_token};
 
 use super::CommandSpec;
 
@@ -18,12 +15,13 @@ impl CommandSpec for AutoRequireCommand {
     const COMMAND: &str = "emmy.auto.require";
 
     async fn handle(context: ServerContextSnapshot, args: Vec<Value>) -> Option<()> {
-        let add_to: FileId = serde_json::from_value(args.get(0)?.clone()).ok()?;
+        let add_to: FileId = serde_json::from_value(args.first()?.clone()).ok()?;
         let need_require_file_id: FileId = serde_json::from_value(args.get(1)?.clone()).ok()?;
         let position: Position = serde_json::from_value(args.get(2)?.clone()).ok()?;
-        let member_name: String = serde_json::from_value(args.get(3)?.clone()).ok()?;
+        let local_name: String = serde_json::from_value(args.get(3)?.clone()).ok()?;
+        let member_name: String = serde_json::from_value(args.get(4)?.clone()).ok()?;
 
-        let analysis = context.analysis.read().await;
+        let analysis = context.analysis().read().await;
         let semantic_model = analysis.compilation.get_semantic_model(add_to)?;
         let module_info = semantic_model
             .get_db()
@@ -32,8 +30,6 @@ impl CommandSpec for AutoRequireCommand {
         let emmyrc = semantic_model.get_emmyrc();
         let require_like_func = &emmyrc.runtime.require_like_function;
         let auto_require_func = emmyrc.completion.auto_require_function.clone();
-        let file_conversion = emmyrc.completion.auto_require_naming_convention;
-        let local_name = module_name_convert(&module_info, file_conversion);
         let require_separator = emmyrc.completion.auto_require_separator.clone();
         let full_module_path = match require_separator.as_str() {
             "." | "" => module_info.full_module_name.clone(),
@@ -66,7 +62,7 @@ impl CommandSpec for AutoRequireCommand {
                 break;
             }
 
-            if is_require_stat(stat.clone(), &require_like_func).unwrap_or(false) {
+            if is_require_stat(stat.clone(), require_like_func).unwrap_or(false) {
                 last_require_stat = Some(stat);
             }
         }
@@ -93,10 +89,10 @@ impl CommandSpec for AutoRequireCommand {
         };
 
         let uri = document.get_uri();
+        #[allow(clippy::mutable_key_type)]
         let mut changes = HashMap::new();
         changes.insert(uri.clone(), vec![text_edit.clone()]);
 
-        let client = context.client;
         let cancel_token = time_cancel_token(Duration::from_secs(5));
         let apply_edit_params = ApplyWorkspaceEditParams {
             label: None,
@@ -107,12 +103,16 @@ impl CommandSpec for AutoRequireCommand {
             },
         };
 
+        let context_clone = context.clone();
         tokio::spawn(async move {
-            let res = client.apply_edit(apply_edit_params, cancel_token).await;
-            if let Some(res) = res {
-                if !res.applied {
-                    log::error!("Failed to apply edit: {:?}", res.failure_reason);
-                }
+            let res = context_clone
+                .client()
+                .apply_edit(apply_edit_params, cancel_token)
+                .await;
+            if let Some(res) = res
+                && !res.applied
+            {
+                log::error!("Failed to apply edit: {:?}", res.failure_reason);
             }
         });
 
@@ -120,12 +120,12 @@ impl CommandSpec for AutoRequireCommand {
     }
 }
 
-fn is_require_stat(stat: LuaStat, require_like_func: &Vec<String>) -> Option<bool> {
+fn is_require_stat(stat: LuaStat, require_like_func: &[String]) -> Option<bool> {
     match stat {
         LuaStat::LocalStat(local_stat) => {
             let exprs = local_stat.get_value_exprs();
             for expr in exprs {
-                if is_require_expr(expr, require_like_func).unwrap_or(false) {
+                if is_require_expr(expr, require_like_func, 0).unwrap_or(false) {
                     return Some(true);
                 }
             }
@@ -133,14 +133,14 @@ fn is_require_stat(stat: LuaStat, require_like_func: &Vec<String>) -> Option<boo
         LuaStat::AssignStat(assign_stat) => {
             let (_, exprs) = assign_stat.get_var_and_expr_list();
             for expr in exprs {
-                if is_require_expr(expr, require_like_func).unwrap_or(false) {
+                if is_require_expr(expr, require_like_func, 0).unwrap_or(false) {
                     return Some(true);
                 }
             }
         }
         LuaStat::CallExprStat(call_expr_stat) => {
             let expr = call_expr_stat.get_call_expr()?;
-            if is_require_expr(expr.into(), require_like_func).unwrap_or(false) {
+            if is_require_expr(expr.into(), require_like_func, 0).unwrap_or(false) {
                 return Some(true);
             }
         }
@@ -150,15 +150,38 @@ fn is_require_stat(stat: LuaStat, require_like_func: &Vec<String>) -> Option<boo
     Some(false)
 }
 
-fn is_require_expr(expr: LuaExpr, require_like_func: &Vec<String>) -> Option<bool> {
-    if let LuaExpr::CallExpr(call_expr) = expr {
-        let name = call_expr.get_prefix_expr()?;
-        if let LuaExpr::NameExpr(name_expr) = name {
-            let name = name_expr.get_name_text()?;
-            if require_like_func.contains(&name.to_string()) || name == "require" {
+fn is_require_expr(expr: LuaExpr, require_like_func: &[String], depth: usize) -> Option<bool> {
+    if depth > 5 {
+        return Some(false);
+    }
+    match expr {
+        LuaExpr::CallExpr(call_expr) => {
+            let name = call_expr.get_prefix_expr()?;
+            match name {
+                LuaExpr::NameExpr(name_expr) => {
+                    let name = name_expr.get_name_text()?;
+                    if require_like_func.contains(&name.to_string()) || name == "require" {
+                        return Some(true);
+                    }
+                }
+                LuaExpr::CallExpr(prefix_call_expr) => {
+                    if is_require_expr(prefix_call_expr.into(), require_like_func, depth + 1)
+                        .unwrap_or(false)
+                    {
+                        return Some(true);
+                    }
+                }
+                _ => {}
+            }
+        }
+        LuaExpr::IndexExpr(index_expr) => {
+            if is_require_expr(index_expr.get_prefix_expr()?, require_like_func, depth + 1)
+                .unwrap_or(false)
+            {
                 return Some(true);
             }
         }
+        _ => {}
     }
 
     Some(false)
@@ -169,12 +192,14 @@ pub fn make_auto_require(
     add_to: FileId,
     need_require_file_id: FileId,
     position: Position,
-    member_name: Option<String>,
+    local_name: String,          // 导入时使用的名称
+    member_name: Option<String>, // 导入的成员名, 不要包含前缀`.`号, 它将拼接到 `require` 后面. 例如 require("a").member
 ) -> Command {
     let args = vec![
         serde_json::to_value(add_to).unwrap(),
         serde_json::to_value(need_require_file_id).unwrap(),
         serde_json::to_value(position).unwrap(),
+        serde_json::to_value(local_name).unwrap(),
         serde_json::to_value(member_name.unwrap_or_default()).unwrap(),
     ];
 

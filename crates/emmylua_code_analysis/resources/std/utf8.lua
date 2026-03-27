@@ -40,26 +40,50 @@ utf8.charpattern = ""
 --- (in bytes) and `c` the code point of each character. It raises an error if
 --- it meets any invalid byte sequence.
 ---@param s string
----@return string
+---@return fun(s: string, i?: integer): integer, integer
 function utf8.codes(s) end
+
+---@version > 5.4
+---@param s string
+---@param lax? boolean
+---@return fun(s: string, i?: integer): integer, integer
+function utf8.codes(s, lax) end
 
 ---
 --- Returns the codepoints (as integers) from all characters in `s` that start
 --- between byte position `i` and `j` (both included). The default for `i` is
 --- 1  and for `j` is `i`. It raises an error if it meets any invalid byte
 --- sequence.
----@overload fun(s:string):number
+---@overload fun(s:string):integer
 ---@param s string
----@param i? number
----@param j? number
----@return number
+---@param i? integer
+---@param j? integer
+---@return integer
 function utf8.codepoint(s, i, j) end
+
+---@version > 5.4
+---@overload fun(s:string):integer
+---@param s string
+---@param i? integer
+---@param j? integer
+---@param lax? boolean
+---@return integer
+function utf8.codepoint(s, i, j, lax) end
 
 ---
 --- Returns the number of UTF-8 characters in string `s` that start between
 --- positions `i` and `j` (both inclusive). The default for `i` is 1 and for
 --- `j` is -1. If it finds any invalid byte sequence, returns a false value
 --- plus the position of the first invalid byte.
+---@param s    string
+---@param i?   integer
+---@param j?   integer
+---@return integer?
+---@return integer? errpos
+---@nodiscard
+function utf8.len(s, i, j) end
+
+---@version > 5.4
 ---@param s    string
 ---@param i?   integer
 ---@param j?   integer
@@ -81,9 +105,9 @@ function utf8.len(s, i, j, lax) end
 --- byte of `s`.
 ---
 --- This function assumes that `s` is a valid UTF-8 string.
----@overload fun(s:string):number
+---@overload fun(s:string):integer
 ---@param s string
----@param n number
----@param i? number
----@return number
+---@param n integer
+---@param i? integer
+---@return integer
 function utf8.offset(s, n, i) end

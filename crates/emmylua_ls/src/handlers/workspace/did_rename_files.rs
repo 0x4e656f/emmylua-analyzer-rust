@@ -1,14 +1,10 @@
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-    str::FromStr,
-};
+use std::{collections::HashMap, path::Path, str::FromStr};
 
 use emmylua_code_analysis::{
-    file_path_to_uri, read_file_with_encoding, uri_to_file_path, FileId, LuaCompilation,
-    LuaModuleIndex, LuaType, SemanticModel, WorkspaceId,
+    FileId, LuaCompilation, LuaModuleIndex, LuaType, SemanticModel, WorkspaceId, file_path_to_uri,
+    read_file_with_encoding, uri_to_file_path,
 };
-use emmylua_parser::{LuaAstNode, LuaCallExpr, LuaIndexExpr};
+use emmylua_parser::{LuaAstNode, LuaCallExpr};
 use lsp_types::{
     ApplyWorkspaceEditParams, FileRename, MessageActionItem, MessageType, RenameFilesParams,
     ShowMessageRequestParams, TextEdit, Uri, WorkspaceEdit,
@@ -24,7 +20,7 @@ pub async fn on_did_rename_files_handler(
 ) -> Option<()> {
     let mut all_renames: Vec<RenameInfo> = vec![];
 
-    let analysis = context.analysis.read().await;
+    let analysis = context.analysis().read().await;
 
     let module_index = analysis.compilation.get_db().get_module_index();
     for file_rename in params.files {
@@ -37,13 +33,13 @@ pub async fn on_did_rename_files_handler(
         let new_path = uri_to_file_path(&new_uri)?;
 
         // 提取重命名信息
-        let rename_info = collect_rename_info(&old_uri, &new_uri, &module_index);
+        let rename_info = collect_rename_info(&old_uri, &new_uri, module_index);
         if let Some(rename_info) = rename_info {
             all_renames.push(rename_info.clone());
         } else {
             // 有可能是目录重命名, 需要收集目录下所有 lua 文件
             if let Some(collected_renames) =
-                collect_directory_lua_files(&old_path, &new_path, &module_index)
+                collect_directory_lua_files(&old_path, &new_path, module_index)
             {
                 all_renames.extend(collected_renames);
             }
@@ -54,26 +50,26 @@ pub async fn on_did_rename_files_handler(
     if !all_renames.is_empty() {
         drop(analysis);
         // 更新
-        let mut analysis = context.analysis.write().await;
+        let mut analysis = context.analysis().write().await;
         let encoding = &analysis.get_emmyrc().workspace.encoding;
         for rename in all_renames.iter() {
             analysis.remove_file_by_uri(&rename.old_uri);
-            if let Some(new_path) = uri_to_file_path(&rename.new_uri) {
-                if let Some(text) = read_file_with_encoding(&new_path, encoding) {
-                    analysis.update_file_by_uri(&rename.new_uri, Some(text));
-                }
+            if let Some(new_path) = uri_to_file_path(&rename.new_uri)
+                && let Some(text) = read_file_with_encoding(&new_path, encoding)
+            {
+                analysis.update_file_by_uri(&rename.new_uri, Some(text));
             }
         }
         drop(analysis);
 
-        let analysis = context.analysis.read().await;
+        let analysis = context.analysis().read().await;
         if let Some(changes) = try_modify_require_path(&analysis.compilation, &all_renames) {
             drop(analysis);
             if changes.is_empty() {
                 return Some(());
             }
 
-            let client = context.client.clone();
+            let client = context.client();
 
             let show_message_params = ShowMessageRequestParams {
                 typ: MessageType::INFO,
@@ -128,11 +124,11 @@ fn collect_rename_info(
     module_index: &LuaModuleIndex,
 ) -> Option<RenameInfo> {
     let (mut old_module_path, workspace_id) =
-        module_index.extract_module_path(uri_to_file_path(&old_uri)?.to_str()?)?;
+        module_index.extract_module_path(uri_to_file_path(old_uri)?.to_str()?)?;
     old_module_path = old_module_path.replace(['\\', '/'], ".");
 
     let (mut new_module_path, _) =
-        module_index.extract_module_path(uri_to_file_path(&new_uri)?.to_str()?)?;
+        module_index.extract_module_path(uri_to_file_path(new_uri)?.to_str()?)?;
     new_module_path = new_module_path.replace(['\\', '/'], ".");
 
     Some(RenameInfo {
@@ -146,8 +142,8 @@ fn collect_rename_info(
 
 /// 收集目录重命名后所有的Lua文件
 fn collect_directory_lua_files(
-    old_path: &PathBuf,
-    new_path: &PathBuf,
+    old_path: &Path,
+    new_path: &Path,
     module_index: &LuaModuleIndex,
 ) -> Option<Vec<RenameInfo>> {
     // 检查新路径是否是目录（旧路径已经不存在了）
@@ -213,8 +209,9 @@ fn try_modify_require_path(
     compilation: &LuaCompilation,
     renames: &Vec<RenameInfo>,
 ) -> Option<HashMap<Uri, Vec<TextEdit>>> {
+    #[allow(clippy::mutable_key_type)]
     let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
-    for file_id in compilation.get_db().get_vfs().get_all_file_ids() {
+    for file_id in compilation.get_db().get_vfs().get_all_local_file_ids() {
         if compilation.get_db().get_module_index().is_std(&file_id) {
             continue;
         }
@@ -230,6 +227,7 @@ fn try_modify_require_path(
     Some(changes)
 }
 
+#[allow(clippy::mutable_key_type)]
 fn try_convert(
     semantic_model: &SemanticModel,
     call_expr: LuaCallExpr,
@@ -237,9 +235,9 @@ fn try_convert(
     changes: &mut HashMap<Uri, Vec<TextEdit>>,
     current_file_id: FileId, // 当前文件id
 ) -> Option<()> {
-    if let Some(_) = call_expr.get_parent::<LuaIndexExpr>() {
-        return None;
-    }
+    // if let Some(_) = call_expr.get_parent::<LuaIndexExpr>() {
+    //     return None;
+    // }
 
     let args_list = call_expr.get_args_list()?;
     let arg_expr = args_list.get_args().next()?;
@@ -275,10 +273,10 @@ fn try_convert(
 
             let full_module_path = match separator.as_str() {
                 "." | "" => rename.new_module_path.clone(),
-                _ => rename.new_module_path.replace(".", &separator),
+                _ => rename.new_module_path.replace(".", separator),
             };
 
-            changes.entry(current_uri).or_insert(vec![]).push(TextEdit {
+            changes.entry(current_uri).or_default().push(TextEdit {
                 range: lsp_range,
                 new_text: format!("'{}'", full_module_path),
             });

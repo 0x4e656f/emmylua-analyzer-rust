@@ -23,13 +23,24 @@ impl LuaFileInfo {
 
 pub fn load_workspace_files(
     root: &Path,
-    include_pattern: &Vec<String>,
-    exclude_pattern: &Vec<String>,
-    exclude_dir: &Vec<PathBuf>,
+    include_pattern: &[String],
+    exclude_pattern: &[String],
+    exclude_dir: &[PathBuf],
     encoding: Option<&str>,
 ) -> Result<Vec<LuaFileInfo>, Box<dyn Error>> {
     let encoding = encoding.unwrap_or("utf-8");
     let mut files = Vec::new();
+    if root.is_file() {
+        if let Some(content) = read_file_with_encoding(root, encoding) {
+            files.push(LuaFileInfo {
+                path: root.to_string_lossy().to_string(),
+                content,
+            });
+        }
+
+        return Ok(files);
+    }
+
     let include_pattern = include_pattern
         .iter()
         .map(|s| s.as_str())
@@ -57,26 +68,23 @@ pub fn load_workspace_files(
 
     for entry in WalkDir::new(root)
         .into_iter()
+        .filter_entry(|e| !exclude_dir.iter().any(|dir| e.path().starts_with(dir)))
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
     {
         let path = entry.path();
-        if exclude_dir.iter().any(|dir| path.starts_with(dir)) {
-            continue;
-        }
-
-        let relative_path = path.strip_prefix(root).unwrap();
+        let relative_path = path.strip_prefix(root)?;
         if exclude_set.is_match(relative_path) {
             continue;
         }
 
-        if include_set.is_match(relative_path) {
-            if let Some(content) = read_file_with_encoding(path, encoding) {
-                files.push(LuaFileInfo {
-                    path: path.to_string_lossy().to_string(),
-                    content,
-                });
-            }
+        if include_set.is_match(relative_path)
+            && let Some(content) = read_file_with_encoding(path, encoding)
+        {
+            files.push(LuaFileInfo {
+                path: path.to_string_lossy().to_string(),
+                content,
+            });
         }
     }
 

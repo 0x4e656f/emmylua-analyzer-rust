@@ -1,6 +1,6 @@
 use std::{collections::HashMap, path::PathBuf};
 
-use include_dir::{include_dir, Dir};
+use include_dir::{Dir, include_dir};
 use tera::Tera;
 
 static TEMPLATE_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/template");
@@ -18,7 +18,7 @@ pub fn init_tl(override_template: Option<PathBuf>) -> Option<Tera> {
 
     if let Some(override_template) = override_template {
         if !override_template.exists() {
-            eprintln!(
+            log::error!(
                 "Override template directory does not exist: {:?}",
                 override_template
             );
@@ -42,7 +42,7 @@ pub fn init_tl(override_template: Option<PathBuf>) -> Option<Tera> {
     match tera.add_raw_templates(files) {
         Ok(_) => {}
         Err(e) => {
-            eprintln!("Failed to add templates: {}", e);
+            log::error!("Failed to add templates: {}", e);
             return None;
         }
     }

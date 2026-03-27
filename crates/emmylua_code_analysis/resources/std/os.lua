@@ -22,7 +22,18 @@ os = {}
 ---@return number
 function os.clock() end
 
----@class std.osdate
+---@class std.osdateparam
+---@field year integer|string four digits
+---@field month integer|string 1-12
+---@field day integer|string 1-31
+---@field hour (integer|string)? 0-23
+---@field min (integer|string)? 0-59
+---@field sec (integer|string)? 0-61, due to leap seconds
+---@field wday (integer|string)? 1-7, Sunday is 1
+---@field yday (integer|string)? 1-366
+---@field isdst boolean? daylight saving flag, a boolean.
+
+---@class std.osdate : std.osdateparam
 ---@field year integer|string four digits
 ---@field month integer|string 1-12
 ---@field day integer|string 1-31
@@ -65,11 +76,11 @@ function os.clock() end
 ---
 --- On non-POSIX systems, this function may be not thread safe because of its
 --- reliance on C function `gmtime` and C function `localtime`.
----@overload fun(fmt:"*t", time: number):table
----@overload fun(fmt:"!*t", time: number):table
+---@overload fun(fmt:"*t", time?: number):std.osdate
+---@overload fun(fmt:"!*t", time?: number):std.osdate
 ---@param format string
 ---@param time? number
----@return string|std.osdate
+---@return string
 function os.date(format, time) end
 
 ---
@@ -81,7 +92,7 @@ function os.date(format, time) end
 ---@return number
 function os.difftime(t2, t1) end
 
---- @version > 5.2
+---@version > 5.2
 ---
 --- This function is equivalent to the C function `system`. It passes `command`
 --- to be executed by an operating system shell. Its first result is **true** if
@@ -102,7 +113,7 @@ function os.difftime(t2, t1) end
 --- @return integer
 function os.execute(command) end
 
---- @version 5.1, JIT
+---@version 5.1, JIT
 ---
 --- This function is equivalent to the C function system. It passes command to
 --- be executed by an operating system shell. It returns a status code, which is
@@ -112,7 +123,7 @@ function os.execute(command) end
 --- @return integer
 function os.execute(command) end
 
---- @version > 5.2, JIT
+---@version > 5.2, JIT
 ---
 --- Calls the ISO C function `exit` to terminate the host program. If `code` is
 --- **true**, the returned status is `EXIT_SUCCESS`; if `code` is **false**, the
@@ -121,24 +132,22 @@ function os.execute(command) end
 ---
 --- If the optional second argument `close` is true, closes the Lua state before
 --- exiting.
----@param code integer
+---@param code? boolean|integer
 ---@param close? boolean
----@return integer
 function os.exit(code, close) end
 
---- @version 5.1
+---@version 5.1
 ---
 --- Calls the C function exit, with an optional `code`, to terminate the host
 --- program. The default value for `code` is the success code.
----@param code integer
----@return integer
+---@param code? integer
 function os.exit(code) end
 
 ---
 --- Returns the value of the process environment variable `varname`, or
 --- **nil** if the variable is not defined.
 ---@param varname string
----@return string
+---@return string?
 function os.getenv(varname) end
 
 ---
@@ -181,17 +190,6 @@ function os.rename(oldname, newname) end
 ---@param category? string
 ---@return string|nil
 function os.setlocale(locale, category) end
-
----@class std.osdateparam
----@field year integer|string four digits
----@field month integer|string 1-12
----@field day integer|string 1-31
----@field hour (integer|string)? 0-23
----@field min (integer|string)? 0-59
----@field sec (integer|string)? 0-61, due to leap seconds
----@field wday (integer|string)? 1-7, Sunday is 1
----@field yday (integer|string)? 1-366
----@field isdst boolean? daylight saving flag, a boolean. 
 
 ---
 --- Returns the current time when called without arguments, or a time

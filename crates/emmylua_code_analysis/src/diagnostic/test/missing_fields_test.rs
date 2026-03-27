@@ -23,7 +23,7 @@ mod tests {
             ---@field a number
 
             ---@class test2: test1
-            
+
             ---@type test
             local test = {}
         "#
@@ -156,7 +156,7 @@ foo({})
         assert!(ws.check_code_for(
             DiagnosticCode::MissingFields,
             r#"
-                ---@type table 
+                ---@type table
                 local a = {}
 
                 print(a[1])
@@ -233,6 +233,29 @@ foo({})
             end
 
             f({})
+        "#
+        ));
+    }
+
+    #[test]
+    fn test_union_table_generic() {
+        let mut ws = VirtualWorkspace::new();
+        ws.def(
+            r#"
+        ---@class RingBuffer<T>
+        ---@field a number
+
+        ---@class LiveList<T>
+        ---@field list table<integer, T> | RingBuffer<T>
+        "#,
+        );
+        assert!(ws.check_code_for(
+            DiagnosticCode::MissingFields,
+            r#"
+            ---@type LiveList
+            local LiveList
+
+            LiveList.list = {}
         "#
         ));
     }

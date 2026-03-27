@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod test {
-    use crate::VirtualWorkspace;
+    use crate::{DiagnosticCode, LuaType, VirtualWorkspace};
 
     #[test]
     fn test_string() {
@@ -149,5 +149,86 @@ mod test {
         let ty = ws.ty("string?");
         let ty2 = ws.expr_ty("(\"hello\"):match(\".*\")");
         assert!(ws.check_type(&ty, &ty2));
+    }
+
+    #[test]
+    fn test_issue_634() {
+        let mut ws = VirtualWorkspace::new();
+
+        assert!(!ws.check_code_for(
+            DiagnosticCode::ParamTypeMismatch,
+            r#"
+            --- @class A
+            --- @field a integer
+
+            --- @param x table<integer,string>
+            local function foo(x) end
+
+            local y --- @type A
+            foo(y) -- should error
+        "#
+        ));
+    }
+
+    #[test]
+    fn test_issue_790() {
+        let mut ws = VirtualWorkspace::new();
+        ws.def(
+            r#"
+        ---@class Holder<T>
+
+        ---@class StringHolder: Holder<string>
+
+        ---@class NumberHolder: Holder<number>
+
+        ---@class StringHolderWith<T>: Holder<string>
+
+        ---@generic T
+        ---@param a T
+        ---@param b T
+        function test(a, b) end
+        "#,
+        );
+
+        assert!(!ws.check_code_for(
+            DiagnosticCode::ParamTypeMismatch,
+            r#"
+            ---@type Holder<string>, NumberHolder
+            local a, b
+            test(a, b)
+        "#
+        ));
+
+        assert!(ws.check_code_for(
+            DiagnosticCode::ParamTypeMismatch,
+            r#"
+            ---@type Holder<string>, StringHolderWith<table>
+            local a, b
+            test(a, b)
+        "#
+        ));
+    }
+
+    #[test]
+    fn test_set_index_expr_owner_prefers_declared_global_type() {
+        let mut ws = VirtualWorkspace::new_with_init_std_lib();
+
+        ws.def_file(
+            "def.lua",
+            r#"
+            table = table
+
+            ---@cast table unknown
+            AFTER_CAST = table
+
+            ---@return integer
+            function table.__sentinel()
+                return 1
+            end
+            "#,
+        );
+
+        assert_eq!(ws.expr_ty("AFTER_CAST"), LuaType::Unknown);
+        assert_eq!(ws.expr_ty("table.__sentinel()"), ws.ty("integer"));
     }
 }

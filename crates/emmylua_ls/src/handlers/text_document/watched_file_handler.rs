@@ -7,12 +7,13 @@ pub async fn on_did_change_watched_files(
     context: ServerContextSnapshot,
     params: DidChangeWatchedFilesParams,
 ) -> Option<()> {
-    let workspace = context.workspace_manager.read().await;
-    let mut analysis = context.analysis.write().await;
+    let workspace = context.workspace_manager().read().await;
+    let mut analysis = context.analysis().write().await;
     let emmyrc = analysis.get_emmyrc();
     let encoding = &emmyrc.workspace.encoding;
     let interval = emmyrc.diagnostics.diagnostic_interval.unwrap_or(500);
     let mut watched_lua_files: Vec<(Uri, Option<String>)> = Vec::new();
+    let lsp_features = context.lsp_features();
     // let
     for file_event in params.changes.into_iter() {
         let file_type = get_file_type(&file_event.uri);
@@ -20,15 +21,15 @@ pub async fn on_did_change_watched_files(
             Some(WatchedFileType::Lua) => {
                 if file_event.typ == FileChangeType::DELETED {
                     analysis.remove_file_by_uri(&file_event.uri);
-                    // 发送空诊断消息以清除客户端显示的诊断
-                    context
-                        .file_diagnostic
-                        .clear_file_diagnostics(file_event.uri)
-                        .await;
+                    if !lsp_features.supports_pull_diagnostic() {
+                        context
+                            .file_diagnostic()
+                            .clear_push_file_diagnostics(file_event.uri);
+                    }
                     continue;
                 }
 
-                if !workspace.current_open_files.contains(&file_event.uri) {
+                if !workspace.is_open_file(&file_event.uri) {
                     if !workspace.is_workspace_file(&file_event.uri) {
                         continue;
                     }
@@ -47,7 +48,7 @@ pub async fn on_did_change_watched_files(
                 }
                 let editorconfig_path = uri_to_file_path(&file_event.uri).unwrap();
                 context
-                    .workspace_manager
+                    .workspace_manager()
                     .read()
                     .await
                     .update_editorconfig(editorconfig_path);
@@ -56,14 +57,12 @@ pub async fn on_did_change_watched_files(
                 if file_event.typ == FileChangeType::DELETED {
                     continue;
                 }
-                let emmyrc_path = uri_to_file_path(&file_event.uri).unwrap();
-                let file_dir = emmyrc_path.parent().unwrap().to_path_buf();
+                let config_path = uri_to_file_path(&file_event.uri).unwrap();
                 context
-                    .workspace_manager
+                    .workspace_manager()
                     .read()
                     .await
-                    .add_update_emmyrc_task(file_dir)
-                    .await;
+                    .add_update_emmyrc_task(context.clone(), config_path);
             }
             None => {}
         }
@@ -71,7 +70,7 @@ pub async fn on_did_change_watched_files(
 
     let file_ids = analysis.update_files_by_uri(watched_lua_files);
     context
-        .file_diagnostic
+        .file_diagnostic()
         .add_files_diagnostic_task(file_ids, interval)
         .await;
 
@@ -109,7 +108,7 @@ fn get_file_type(uri: &Uri) -> Option<WatchedFileType> {
     let file_name = path.file_name()?.to_str()?;
     match file_name {
         ".editorconfig" => Some(WatchedFileType::Editorconfig),
-        ".emmyrc.json" | ".luarc.json" => Some(WatchedFileType::Emmyrc),
+        ".emmyrc.json" | ".luarc.json" | ".emmyrc.lua" => Some(WatchedFileType::Emmyrc),
         _ => Some(WatchedFileType::Lua),
     }
 }

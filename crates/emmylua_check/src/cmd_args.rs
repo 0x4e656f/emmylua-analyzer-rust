@@ -1,44 +1,60 @@
+#[cfg(feature = "cli")]
 use clap::{Parser, ValueEnum};
+
 use std::path::PathBuf;
 
 #[allow(unused)]
-#[derive(Debug, Parser, Clone)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "cli", derive(Parser))]
+#[cfg_attr(feature = "cli", command(version))]
 pub struct CmdArgs {
     /// Configuration file paths.
-    /// If not provided, both ".emmyrc.json" and ".luarc.json" will be searched in the workspace
+    /// If not provided, both ".emmyrc.json" ".emmyrc.lua" and ".luarc.json" will be searched in the workspace
     /// directory
-    #[arg(short, long, value_delimiter = ',')]
+    #[cfg_attr(feature = "cli", arg(short, long, value_delimiter = ','))]
     pub config: Option<Vec<PathBuf>>,
 
     /// Path to the workspace directory
-    pub workspace: PathBuf,
+    #[arg(num_args = 1..)]
+    pub workspace: Vec<PathBuf>,
 
     /// Comma separated list of ignore patterns.
     /// Patterns must follow glob syntax
-    #[arg(short, long, value_delimiter = ',')]
+    #[cfg_attr(feature = "cli", arg(short, long, value_delimiter = ','))]
     pub ignore: Option<Vec<String>>,
 
     /// Specify output format
-    #[arg(long, default_value = "text", value_enum, ignore_case = true)]
+    #[cfg_attr(
+        feature = "cli",
+        arg(
+            long,
+            short = 'f',
+            default_value = "text",
+            value_enum,
+            ignore_case = true
+        )
+    )]
     pub output_format: OutputFormat,
 
-    /// Specify output destination (stdout or a file path, only used when output_format is json).
-    #[arg(long, default_value = "stdout")]
+    /// Specify output destination (stdout or a file path, only used when output_format is json)
+    #[cfg_attr(feature = "cli", arg(long, default_value = "stdout"))]
     pub output: OutputDestination,
 
     /// Treat warnings as errors
-    #[arg(long)]
+    #[cfg_attr(feature = "cli", arg(long))]
     pub warnings_as_errors: bool,
 
     /// Verbose output
-    #[arg(long)]
+    #[cfg_attr(feature = "cli", arg(long))]
     pub verbose: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, ValueEnum)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "cli", derive(ValueEnum))]
 pub enum OutputFormat {
     Json,
     Text,
+    Sarif,
 }
 
 #[allow(unused)]

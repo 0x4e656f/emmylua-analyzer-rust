@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use emmylua_parser::LuaAstNode;
 
 use crate::{
-    compilation::analyzer::infer_manager::InferCacheManager, infer_expr, infer_param, DbIndex,
-    InFiled, InferFailReason, LuaDocReturnInfo, LuaSemanticDeclId, LuaType, LuaTypeCache,
-    SignatureReturnStatus,
+    DbIndex, InFiled, InferFailReason, LuaDocReturnInfo, LuaSemanticDeclId, LuaType, LuaTypeCache,
+    SignatureReturnStatus, compilation::analyzer::infer_cache_manager::InferCacheManager,
+    infer_expr, infer_param,
 };
 
 use super::UnResolve;
@@ -18,21 +18,25 @@ pub fn check_reach_reason(
     match reason {
         InferFailReason::None
         | InferFailReason::FieldNotFound
+        | InferFailReason::UnResolveOperatorCall
         | InferFailReason::RecursiveInfer => Some(true),
         InferFailReason::UnResolveDeclType(decl_id) => {
             let decl = db.get_decl_index().get_decl(decl_id)?;
-            let typ = db.get_type_index().get_type_cache(&decl_id.clone().into());
+            let typ = db.get_type_index().get_type_cache(&(*decl_id).into());
             if typ.is_none() && decl.is_param() {
                 return Some(infer_param(db, decl).is_ok());
             }
 
             Some(typ.is_some())
         }
+        InferFailReason::UnResolveTypeDecl(type_id) => {
+            Some(db.get_type_index().get_type_decl(type_id).is_some())
+        }
         InferFailReason::UnResolveMemberType(member_id) => {
             let member = db.get_member_index().get_member(member_id)?;
             let key = member.get_key();
             let owner = db.get_member_index().get_current_owner(member_id)?;
-            let member_item = db.get_member_index().get_member_item(&owner, key)?;
+            let member_item = db.get_member_index().get_member_item(owner, key)?;
             Some(member_item.resolve_type(db).is_ok())
         }
         InferFailReason::UnResolveExpr(expr) => {
@@ -42,6 +46,10 @@ pub fn check_reach_reason(
         InferFailReason::UnResolveSignatureReturn(signature_id) => {
             let signature = db.get_signature_index().get(signature_id)?;
             Some(signature.is_resolve_return())
+        }
+        InferFailReason::UnResolveModuleExport(file_id) => {
+            let module = db.get_module_index().get_module(*file_id)?;
+            Some(module.export_type.is_some())
         }
     }
 }
@@ -60,14 +68,14 @@ pub fn resolve_as_any(db: &mut DbIndex, reason: &InferFailReason, loop_count: us
     match reason {
         InferFailReason::None
         | InferFailReason::FieldNotFound
+        | InferFailReason::UnResolveTypeDecl(_)
+        | InferFailReason::UnResolveOperatorCall
         | InferFailReason::RecursiveInfer => {
             return Some(());
         }
         InferFailReason::UnResolveDeclType(decl_id) => {
-            db.get_type_index_mut().bind_type(
-                decl_id.clone().into(),
-                LuaTypeCache::InferType(LuaType::Any),
-            );
+            db.get_type_index_mut()
+                .bind_type((*decl_id).into(), LuaTypeCache::InferType(LuaType::Any));
         }
         InferFailReason::UnResolveMemberType(member_id) => {
             // 第一次循环不处理, 或许需要判断`unresolves`是否全为取值再跳过?
@@ -76,8 +84,8 @@ pub fn resolve_as_any(db: &mut DbIndex, reason: &InferFailReason, loop_count: us
             }
             let member = db.get_member_index().get_member(member_id)?;
             let key = member.get_key();
-            let owner = db.get_member_index().get_current_owner(&member_id)?;
-            let member_item = db.get_member_index().get_member_item(&owner, key)?;
+            let owner = db.get_member_index().get_current_owner(member_id)?;
+            let member_item = db.get_member_index().get_member_item(owner, key)?;
             let opt_type = member_item.resolve_type(db).ok();
             if opt_type.is_none() {
                 let semantic_member_id = member_item.resolve_semantic_decl(db)?;
@@ -99,8 +107,15 @@ pub fn resolve_as_any(db: &mut DbIndex, reason: &InferFailReason, loop_count: us
                     name: None,
                     type_ref: LuaType::Any,
                     description: None,
+                    attributes: None,
                 }];
                 signature.resolve_return = SignatureReturnStatus::InferResolve;
+            }
+        }
+        InferFailReason::UnResolveModuleExport(file_id) => {
+            let module = db.get_module_index_mut().get_module_mut(*file_id)?;
+            if module.export_type.is_none() {
+                module.export_type = Some(LuaType::Any);
             }
         }
     }

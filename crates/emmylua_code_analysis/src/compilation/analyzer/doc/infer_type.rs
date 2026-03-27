@@ -1,24 +1,29 @@
 use std::sync::Arc;
 
 use emmylua_parser::{
-    LuaAst, LuaAstNode, LuaDocBinaryType, LuaDocDescriptionOwner, LuaDocFuncType,
-    LuaDocGenericType, LuaDocMultiLineUnionType, LuaDocObjectFieldKey, LuaDocObjectType,
-    LuaDocStrTplType, LuaDocType, LuaDocUnaryType, LuaDocVariadicType, LuaLiteralToken,
-    LuaSyntaxKind, LuaTypeBinaryOperator, LuaTypeUnaryOperator, LuaVarExpr,
+    LuaAst, LuaAstNode, LuaDocAttributeType, LuaDocBinaryType, LuaDocConditionalType,
+    LuaDocDescriptionOwner, LuaDocFuncType, LuaDocGenericDecl, LuaDocGenericDeclList,
+    LuaDocGenericType, LuaDocIndexAccessType, LuaDocInferType, LuaDocMappedType,
+    LuaDocMultiLineUnionType, LuaDocObjectFieldKey, LuaDocObjectType, LuaDocStrTplType, LuaDocType,
+    LuaDocUnaryType, LuaDocVariadicType, LuaLiteralToken, LuaSyntaxKind, LuaTypeBinaryOperator,
+    LuaTypeUnaryOperator, LuaVarExpr, NumberResult,
 };
+use internment::ArcIntern;
 use rowan::TextRange;
 use smol_str::SmolStr;
 
 use crate::{
+    AsyncState, DiagnosticCode, GenericParam, GenericTpl, InFiled, LuaAliasCallKind, LuaArrayLen,
+    LuaArrayType, LuaAttributeType, LuaMultiLineUnion, LuaTupleStatus, LuaTypeDeclId, TypeOps,
+    VariadicType,
     db_index::{
-        AnalyzeError, LuaAliasCallType, LuaFunctionType, LuaGenericType, LuaIndexAccessKey,
-        LuaIntersectionType, LuaObjectType, LuaStringTplType, LuaTupleType, LuaType, LuaUnionType,
+        AnalyzeError, LuaAliasCallType, LuaConditionalType, LuaFunctionType, LuaGenericType,
+        LuaIndexAccessKey, LuaIntersectionType, LuaMappedType, LuaObjectType, LuaStringTplType,
+        LuaTupleType, LuaType,
     },
-    DiagnosticCode, GenericTpl, InFiled, LuaAliasCallKind, LuaMultiLineUnion, LuaTupleStatus,
-    LuaTypeDeclId, TypeOps, VariadicType,
 };
 
-use super::{preprocess_description, DocAnalyzer};
+use super::{DocAnalyzer, preprocess_description};
 
 pub fn infer_type(analyzer: &mut DocAnalyzer, node: LuaDocType) -> LuaType {
     match &node {
@@ -47,24 +52,24 @@ pub fn infer_type(analyzer: &mut DocAnalyzer, node: LuaDocType) -> LuaType {
                 if t.is_unknown() {
                     return LuaType::Unknown;
                 }
-                return LuaType::Array(t.into());
+                return LuaType::Array(LuaArrayType::new(t, LuaArrayLen::None).into());
             }
         }
         LuaDocType::Literal(literal) => {
             if let Some(literal_token) = literal.get_literal() {
                 match literal_token {
                     LuaLiteralToken::String(str_token) => {
-                        return LuaType::DocStringConst(SmolStr::new(str_token.get_value()).into())
+                        return LuaType::DocStringConst(SmolStr::new(str_token.get_value()).into());
                     }
                     LuaLiteralToken::Number(number_token) => {
-                        if number_token.is_int() {
-                            return LuaType::DocIntegerConst(number_token.get_int_value());
+                        if let NumberResult::Int(i) = number_token.get_number_value() {
+                            return LuaType::DocIntegerConst(i);
                         } else {
                             return LuaType::Number;
                         }
                     }
                     LuaLiteralToken::Bool(bool_token) => {
-                        return LuaType::DocBooleanConst(bool_token.is_true())
+                        return LuaType::DocBooleanConst(bool_token.is_true());
                     }
                     LuaLiteralToken::Nil(_) => return LuaType::Nil,
                     // todo
@@ -108,7 +113,23 @@ pub fn infer_type(analyzer: &mut DocAnalyzer, node: LuaDocType) -> LuaType {
         LuaDocType::MultiLineUnion(multi_union) => {
             return infer_multi_line_union_type(analyzer, multi_union);
         }
-        _ => {} // LuaDocType::Conditional(lua_doc_conditional_type) => todo!(),
+        LuaDocType::Attribute(attribute_type) => {
+            return infer_attribute_type(analyzer, attribute_type);
+        }
+        LuaDocType::Conditional(cond_type) => {
+            return infer_conditional_type(analyzer, cond_type);
+        }
+        LuaDocType::Infer(infer_type) => {
+            if let Some(name) = infer_type.get_generic_decl_name_text() {
+                return LuaType::ConditionalInfer(ArcIntern::new(SmolStr::new(&name)));
+            }
+        }
+        LuaDocType::Mapped(mapped_type) => {
+            return infer_mapped_type(analyzer, mapped_type).unwrap_or(LuaType::Unknown);
+        }
+        LuaDocType::IndexAccess(index_access) => {
+            return infer_index_access_type(analyzer, index_access);
+        }
     }
     LuaType::Unknown
 }
@@ -122,6 +143,7 @@ fn infer_buildin_or_ref_type(
     let position = range.start();
     match name {
         "unknown" => LuaType::Unknown,
+        "never" => LuaType::Never,
         "nil" | "void" => LuaType::Nil,
         "any" => LuaType::Any,
         "userdata" => LuaType::Userdata,
@@ -142,10 +164,12 @@ fn infer_buildin_or_ref_type(
             LuaType::Table
         }
         _ => {
-            if let Some(tpl_id) = analyzer.generic_index.find_generic(position, name) {
+            if let Some((tpl_id, constraint)) = analyzer.generic_index.find_generic(position, name)
+            {
                 return LuaType::TplRef(Arc::new(GenericTpl::new(
                     tpl_id,
                     SmolStr::new(name).into(),
+                    constraint,
                 )));
             }
 
@@ -158,7 +182,7 @@ fn infer_buildin_or_ref_type(
                 founded = true;
                 name_type_decl.get_id()
             } else {
-                LuaTypeDeclId::new(name)
+                LuaTypeDeclId::global(name)
             };
 
             if !founded {
@@ -202,35 +226,50 @@ fn infer_special_table_type(
 }
 
 fn infer_generic_type(analyzer: &mut DocAnalyzer, generic_type: &LuaDocGenericType) -> LuaType {
-    if let Some(name_type) = generic_type.get_name_type() {
-        if let Some(name) = name_type.get_name_text() {
-            if let Some(typ) = infer_special_generic_type(analyzer, &name, &generic_type) {
-                return typ;
-            }
-
-            let id = if let Some(name_type_decl) = analyzer
-                .db
-                .get_type_index_mut()
-                .find_type_decl(analyzer.file_id, &name)
-            {
-                name_type_decl.get_id()
-            } else {
-                return LuaType::Unknown;
-            };
-
-            let mut generic_params = Vec::new();
-            if let Some(generic_decl_list) = generic_type.get_generic_types() {
-                for param in generic_decl_list.get_types() {
-                    let param_type = infer_type(analyzer, param);
-                    if param_type.is_unknown() {
-                        return LuaType::Unknown;
-                    }
-                    generic_params.push(param_type);
-                }
-            }
-
-            return LuaType::Generic(LuaGenericType::new(id, generic_params).into());
+    if let Some(name_type) = generic_type.get_name_type()
+        && let Some(name) = name_type.get_name_text()
+    {
+        if let Some(typ) = infer_special_generic_type(analyzer, &name, generic_type) {
+            return typ;
         }
+
+        let id = if let Some(name_type_decl) = analyzer
+            .db
+            .get_type_index_mut()
+            .find_type_decl(analyzer.file_id, &name)
+        {
+            name_type_decl.get_id()
+        } else {
+            analyzer.db.get_diagnostic_index_mut().add_diagnostic(
+                analyzer.file_id,
+                AnalyzeError::new(
+                    DiagnosticCode::TypeNotFound,
+                    &t!("Type '%{name}' not found", name = name),
+                    generic_type.get_range(),
+                ),
+            );
+            return LuaType::Unknown;
+        };
+
+        let mut generic_params = Vec::new();
+        if let Some(generic_decl_list) = generic_type.get_generic_types() {
+            for param in generic_decl_list.get_types() {
+                let param_type = infer_type(analyzer, param);
+                if param_type.is_unknown() {
+                    return LuaType::Unknown;
+                }
+                generic_params.push(param_type);
+            }
+        }
+        if let Some(name_type) = generic_type.get_name_type() {
+            analyzer.db.get_reference_index_mut().add_type_reference(
+                analyzer.file_id,
+                id.clone(),
+                name_type.get_range(),
+            );
+        }
+
+        return LuaType::Generic(LuaGenericType::new(id, generic_params).into());
     }
 
     LuaType::Unknown
@@ -295,6 +334,32 @@ fn infer_special_generic_type(
 
             return Some(LuaType::TypeGuard(first_param.into()));
         }
+        "std.ConstTpl" => {
+            let first_doc_param_type = generic_type.get_generic_types()?.get_types().next()?;
+            let first_param = infer_type(analyzer, first_doc_param_type);
+            if let LuaType::TplRef(tpl) = first_param {
+                return Some(LuaType::ConstTplRef(tpl));
+            }
+        }
+        "Language" => {
+            let first_doc_param_type = generic_type.get_generic_types()?.get_types().next()?;
+            let first_param = infer_type(analyzer, first_doc_param_type);
+            if let LuaType::DocStringConst(lang_str) = first_param {
+                return Some(LuaType::Language(lang_str));
+            }
+        }
+        "Merge" => {
+            let mut params = Vec::new();
+            for param in generic_type.get_generic_types()?.get_types() {
+                params.push(infer_type(analyzer, param));
+            }
+            if params.len() != 2 {
+                return Some(LuaType::Unknown);
+            }
+            return Some(LuaType::Call(
+                LuaAliasCallType::new(LuaAliasCallKind::Merge, params).into(),
+            ));
+        }
         _ => {}
     }
 
@@ -316,23 +381,23 @@ fn infer_binary_type(analyzer: &mut DocAnalyzer, binary_type: &LuaDocBinaryType)
             match op.get_op() {
                 LuaTypeBinaryOperator::Union => match (left_type, right_type) {
                     (LuaType::Union(left_type_union), LuaType::Union(right_type_union)) => {
-                        let mut left_types = left_type_union.into_types();
-                        let right_types = right_type_union.into_types();
-                        left_types.extend(right_types);
-                        return LuaType::Union(LuaUnionType::new(left_types).into());
+                        let mut left_type_set = left_type_union.into_vec();
+                        let right_types = right_type_union.into_vec();
+                        left_type_set.extend(right_types);
+                        return LuaType::from_vec(left_type_set);
                     }
                     (LuaType::Union(left_type_union), right) => {
-                        let mut left_types = (*left_type_union).into_types();
+                        let mut left_types = (*left_type_union).into_vec();
                         left_types.push(right);
-                        return LuaType::Union(LuaUnionType::new(left_types).into());
+                        return LuaType::from_vec(left_types);
                     }
                     (left, LuaType::Union(right_type_union)) => {
-                        let mut right_types = (*right_type_union).into_types();
+                        let mut right_types = (*right_type_union).into_vec();
                         right_types.push(left);
-                        return LuaType::Union(LuaUnionType::new(right_types).into());
+                        return LuaType::from_vec(right_types);
                     }
                     (left, right) => {
-                        return LuaType::Union(LuaUnionType::new(vec![left, right]).into());
+                        return LuaType::from_vec(vec![left, right]);
                     }
                 },
                 LuaTypeBinaryOperator::Intersection => match (left_type, right_type) {
@@ -418,11 +483,17 @@ fn infer_unary_type(analyzer: &mut DocAnalyzer, unary_type: &LuaDocUnaryType) ->
 }
 
 fn infer_func_type(analyzer: &mut DocAnalyzer, func: &LuaDocFuncType) -> LuaType {
+    if let Some(generic_list) = func.get_generic_decl_list() {
+        register_inline_func_generics(analyzer, func, generic_list);
+    }
+
     let mut params_result = Vec::new();
+    let mut is_variadic = false;
     for param in func.get_params() {
         let name = if let Some(param) = param.get_name_token() {
             param.get_name_text().to_string()
         } else if param.is_dots() {
+            is_variadic = true;
             "...".to_string()
         } else {
             continue;
@@ -456,7 +527,13 @@ fn infer_func_type(analyzer: &mut DocAnalyzer, func: &LuaDocFuncType) -> LuaType
         }
     }
 
-    let is_async = func.is_async();
+    let async_state = if func.is_async() {
+        AsyncState::Async
+    } else if func.is_sync() {
+        AsyncState::Sync
+    } else {
+        AsyncState::None
+    };
 
     let mut is_colon = false;
     if let Some(parent) = func.get_parent::<LuaAst>() {
@@ -467,12 +544,11 @@ fn infer_func_type(analyzer: &mut DocAnalyzer, func: &LuaDocFuncType) -> LuaType
     }
 
     // compact luals
-    if is_colon {
-        if let Some(first_param) = params_result.first() {
-            if first_param.0 == "self" {
-                is_colon = false
-            }
-        }
+    if is_colon
+        && let Some(first_param) = params_result.first()
+        && first_param.0 == "self"
+    {
+        is_colon = false
     }
 
     let return_type = if return_types.len() == 1 {
@@ -484,20 +560,54 @@ fn infer_func_type(analyzer: &mut DocAnalyzer, func: &LuaDocFuncType) -> LuaType
     };
 
     LuaType::DocFunction(
-        LuaFunctionType::new(is_async, is_colon, params_result, return_type).into(),
+        LuaFunctionType::new(
+            async_state,
+            is_colon,
+            is_variadic,
+            params_result,
+            return_type,
+        )
+        .into(),
     )
+}
+
+fn register_inline_func_generics(
+    analyzer: &mut DocAnalyzer,
+    func: &LuaDocFuncType,
+    generic_list: LuaDocGenericDeclList,
+) {
+    let mut generics = Vec::new();
+    for param in generic_list.get_generic_decl() {
+        let Some(name_token) = param.get_name_token() else {
+            continue;
+        };
+
+        let constraint = param.get_type().map(|ty| infer_type(analyzer, ty));
+        generics.push(GenericParam::new(
+            SmolStr::new(name_token.get_name_text()),
+            constraint,
+            None,
+        ));
+    }
+    if generics.is_empty() {
+        return;
+    }
+
+    let scope_id = analyzer
+        .generic_index
+        .add_generic_scope(vec![func.get_range()], true);
+    analyzer
+        .generic_index
+        .append_generic_params(scope_id, generics);
 }
 
 fn get_colon_define(analyzer: &mut DocAnalyzer) -> Option<bool> {
     let owner = analyzer.comment.get_owner()?;
-    match owner {
-        LuaAst::LuaFuncStat(func_stat) => {
-            let func_name = func_stat.get_func_name()?;
-            if let LuaVarExpr::IndexExpr(index_expr) = func_name {
-                return Some(index_expr.get_index_token()?.is_colon());
-            }
+    if let LuaAst::LuaFuncStat(func_stat) = owner {
+        let func_name = func_stat.get_func_name()?;
+        if let LuaVarExpr::IndexExpr(index_expr) = func_name {
+            return Some(index_expr.get_index_token()?.is_colon());
         }
-        _ => {}
     }
 
     None
@@ -512,7 +622,11 @@ fn infer_object_type(analyzer: &mut DocAnalyzer, object_type: &LuaDocObjectType)
                     LuaIndexAccessKey::String(name.get_name_text().to_string().into())
                 }
                 LuaDocObjectFieldKey::Integer(int) => {
-                    LuaIndexAccessKey::Integer(int.get_int_value())
+                    if let NumberResult::Int(i) = int.get_number_value() {
+                        LuaIndexAccessKey::Integer(i)
+                    } else {
+                        continue;
+                    }
                 }
                 LuaDocObjectFieldKey::String(str) => {
                     LuaIndexAccessKey::String(str.get_value().to_string().into())
@@ -549,10 +663,16 @@ fn infer_str_tpl(
         let typ = infer_buildin_or_ref_type(analyzer, &tpl, str_tpl.get_range(), node);
         if let LuaType::TplRef(tpl) = typ {
             let tpl_id = tpl.get_tpl_id();
-            let prefix = prefix.unwrap_or("".to_string());
-            let suffix = suffix.unwrap_or("".to_string());
+            let prefix = prefix.unwrap_or_default();
+            let suffix = suffix.unwrap_or_default();
             if tpl_id.is_func() {
-                let str_tpl_type = LuaStringTplType::new(&prefix, &tpl.get_name(), tpl_id, &suffix);
+                let str_tpl_type = LuaStringTplType::new(
+                    &prefix,
+                    tpl.get_name(),
+                    tpl_id,
+                    &suffix,
+                    tpl.get_constraint().cloned(),
+                );
                 return LuaType::StrTplRef(str_tpl_type.into());
             }
         }
@@ -603,4 +723,141 @@ fn infer_multi_line_union_type(
     }
 
     LuaType::MultiLineUnion(LuaMultiLineUnion::new(union_members).into())
+}
+
+fn infer_attribute_type(
+    analyzer: &mut DocAnalyzer,
+    attribute_type: &LuaDocAttributeType,
+) -> LuaType {
+    let mut params_result = Vec::new();
+    for param in attribute_type.get_params() {
+        let name = if let Some(param) = param.get_name_token() {
+            param.get_name_text().to_string()
+        } else if param.is_dots() {
+            "...".to_string()
+        } else {
+            continue;
+        };
+
+        let nullable = param.is_nullable();
+
+        let type_ref = if let Some(type_ref) = param.get_type() {
+            let mut typ = infer_type(analyzer, type_ref);
+            if nullable && !typ.is_nullable() {
+                typ = TypeOps::Union.apply(analyzer.db, &typ, &LuaType::Nil);
+            }
+            Some(typ)
+        } else {
+            None
+        };
+
+        params_result.push((name, type_ref));
+    }
+
+    LuaType::DocAttribute(LuaAttributeType::new(params_result).into())
+}
+
+fn infer_conditional_type(
+    analyzer: &mut DocAnalyzer,
+    cond_type: &LuaDocConditionalType,
+) -> LuaType {
+    if let Some((condition, when_true, when_false)) = cond_type.get_types() {
+        // 收集条件中的所有 infer 声明
+        let infer_params = collect_cond_infer_params(&condition);
+        if !infer_params.is_empty() {
+            // 条件表达式中 infer 声明的类型参数只允许在`true`分支中使用
+            let true_range = when_true.get_range();
+            let scope_id = analyzer
+                .generic_index
+                .add_generic_scope(vec![true_range], false);
+            analyzer
+                .generic_index
+                .append_generic_params(scope_id, infer_params.clone());
+        }
+
+        // 处理条件和分支类型
+        let condition_type = infer_type(analyzer, condition);
+        let true_type = infer_type(analyzer, when_true);
+        let false_type = infer_type(analyzer, when_false);
+
+        return LuaConditionalType::new(
+            condition_type,
+            true_type,
+            false_type,
+            infer_params,
+            cond_type.has_new().unwrap_or(false),
+        )
+        .into();
+    }
+
+    LuaType::Unknown
+}
+
+/// 收集条件类型中的条件表达式中所有 infer 声明
+fn collect_cond_infer_params(doc_type: &LuaDocType) -> Vec<GenericParam> {
+    let mut params = Vec::new();
+    let doc_infer_types = doc_type.descendants::<LuaDocInferType>();
+    for infer_type in doc_infer_types {
+        if let Some(name) = infer_type.get_generic_decl_name_text() {
+            params.push(GenericParam::new(SmolStr::new(&name), None, None));
+        }
+    }
+    params
+}
+
+fn infer_mapped_type(
+    analyzer: &mut DocAnalyzer,
+    mapped_type: &LuaDocMappedType,
+) -> Option<LuaType> {
+    // [P in K]
+    let mapped_key = mapped_type.get_key()?;
+    let generic_decl = mapped_key.child::<LuaDocGenericDecl>()?;
+    let name_token = generic_decl.get_name_token()?;
+    let name = name_token.get_name_text();
+    let constraint = generic_decl
+        .get_type()
+        .map(|constraint| infer_type(analyzer, constraint));
+    let param = GenericParam::new(SmolStr::new(name), constraint, None);
+
+    let scope_id = analyzer
+        .generic_index
+        .add_generic_scope(vec![mapped_type.get_range()], false);
+    analyzer
+        .generic_index
+        .append_generic_param(scope_id, param.clone());
+    let position = mapped_type.get_range().start();
+    let (id, _) = analyzer.generic_index.find_generic(position, name)?;
+
+    let doc_type = mapped_type.get_value_type()?;
+    let value_type = infer_type(analyzer, doc_type);
+
+    Some(LuaType::Mapped(
+        LuaMappedType::new(
+            (id, param),
+            value_type,
+            mapped_type.is_readonly(),
+            mapped_type.is_optional(),
+        )
+        .into(),
+    ))
+}
+
+fn infer_index_access_type(
+    analyzer: &mut DocAnalyzer,
+    index_access: &LuaDocIndexAccessType,
+) -> LuaType {
+    let mut types_iter = index_access.children::<LuaDocType>();
+    let Some(source_doc) = types_iter.next() else {
+        return LuaType::Unknown;
+    };
+    let Some(key_doc) = types_iter.next() else {
+        return LuaType::Unknown;
+    };
+
+    let source_type = infer_type(analyzer, source_doc);
+    let key_type = infer_type(analyzer, key_doc);
+
+    LuaType::Call(
+        LuaAliasCallType::new(LuaAliasCallKind::Index, vec![source_type, key_type]).into(),
+    )
 }

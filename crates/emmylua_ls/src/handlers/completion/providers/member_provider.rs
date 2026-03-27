@@ -1,10 +1,12 @@
 use emmylua_code_analysis::{
-    enum_variable_is_param, DbIndex, LuaMemberInfo, LuaSemanticDeclId, LuaType, LuaTypeDeclId,
+    DbIndex, LuaMemberInfo, LuaMemberKey, LuaSemanticDeclId, LuaType, LuaTypeDeclId, SemanticModel,
+    enum_variable_is_param, get_tpl_ref_extend_type,
 };
 use emmylua_parser::{LuaAstNode, LuaAstToken, LuaIndexExpr, LuaStringToken};
+use std::collections::HashMap;
 
 use crate::handlers::completion::{
-    add_completions::{add_member_completion, CompletionTriggerStatus},
+    add_completions::{CompletionTriggerStatus, add_member_completion},
     completion_builder::CompletionBuilder,
 };
 
@@ -26,11 +28,24 @@ pub fn add_completion(builder: &mut CompletionBuilder) -> Option<()> {
     };
 
     let prefix_expr = index_expr.get_prefix_expr()?;
-    let prefix_type = builder.semantic_model.infer_expr(prefix_expr.into()).ok()?;
+    let prefix_type = match builder
+        .semantic_model
+        .infer_expr(prefix_expr.clone())
+        .ok()?
+    {
+        LuaType::TplRef(tpl) => get_tpl_ref_extend_type(
+            builder.semantic_model.get_db(),
+            &mut builder.semantic_model.get_cache().borrow_mut(),
+            &LuaType::TplRef(tpl.clone()),
+            prefix_expr.clone(),
+            0,
+        )?,
+        prefix_type => prefix_type,
+    };
     // 如果是枚举类型且为函数参数, 则不进行补全
     if enum_variable_is_param(
         builder.semantic_model.get_db(),
-        &mut builder.semantic_model.get_config().borrow_mut(),
+        &mut builder.semantic_model.get_cache().borrow_mut(),
         &index_expr,
         &prefix_type,
     )
@@ -40,8 +55,21 @@ pub fn add_completion(builder: &mut CompletionBuilder) -> Option<()> {
     }
 
     let member_info_map = builder.semantic_model.get_member_info_map(&prefix_type)?;
-    for (_, member_infos) in member_info_map.iter() {
-        add_resolve_member_infos(builder, &member_infos, completion_status);
+
+    add_completions_for_members(builder, &member_info_map, completion_status)
+}
+
+pub fn add_completions_for_members(
+    builder: &mut CompletionBuilder,
+    members: &HashMap<LuaMemberKey, Vec<LuaMemberInfo>>,
+    completion_status: CompletionTriggerStatus,
+) -> Option<()> {
+    // 排序
+    let mut sorted_entries: Vec<_> = members.iter().collect();
+    sorted_entries.sort_unstable_by(|(name1, _), (name2, _)| name1.cmp(name2));
+
+    for (_, member_infos) in sorted_entries {
+        add_resolve_member_infos(builder, member_infos, completion_status);
     }
 
     Some(())
@@ -53,11 +81,24 @@ fn add_resolve_member_infos(
     completion_status: CompletionTriggerStatus,
 ) -> Option<()> {
     if member_infos.len() == 1 {
-        let overload_count = count_function_overloads(
-            builder.semantic_model.get_db(),
-            &member_infos.iter().map(|info| info).collect::<Vec<_>>(),
-        );
         let member_info = &member_infos[0];
+        let overload_count = match &member_info.typ {
+            LuaType::DocFunction(_) => None,
+            LuaType::Signature(id) => {
+                if let Some(signature) = builder
+                    .semantic_model
+                    .get_db()
+                    .get_signature_index()
+                    .get(id)
+                {
+                    let count = signature.overloads.len();
+                    if count == 0 { None } else { Some(count) }
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
         add_member_completion(
             builder,
             member_info.clone(),
@@ -67,86 +108,43 @@ fn add_resolve_member_infos(
         return Some(());
     }
 
-    let mut resolve_state = MemberResolveState::All;
-    if builder
-        .semantic_model
-        .get_db()
-        .get_emmyrc()
-        .strict
-        .meta_override_file_define
-    {
-        for member_info in member_infos {
-            match member_info.feature {
-                Some(feature) => {
-                    if feature.is_meta_decl() {
-                        resolve_state = MemberResolveState::Meta;
-                        break;
-                    } else if feature.is_file_decl() {
-                        resolve_state = MemberResolveState::FileDecl;
-                    }
-                }
-                None => {}
-            }
-        }
-    }
+    let (filtered_member_infos, overload_count) =
+        filter_member_infos(&builder.semantic_model, member_infos)?;
 
-    // 屏蔽掉父类成员
-    let first_owner = get_owner_type_id(builder.semantic_model.get_db(), member_infos.first()?);
-    let member_infos: Vec<&LuaMemberInfo> = member_infos
-        .iter()
-        .filter(|member_info| {
-            get_owner_type_id(builder.semantic_model.get_db(), member_info) == first_owner
-        })
-        .collect();
+    let resolve_state = get_resolve_state(builder.semantic_model.get_db(), &filtered_member_infos);
 
-    // 当全为`DocFunction`时, 只取第一个作为补全项
-    let limit_doc_function = member_infos
-        .iter()
-        .all(|info| matches!(info.typ, LuaType::DocFunction(_)));
-
-    let function_count = count_function_overloads(builder.semantic_model.get_db(), &member_infos);
-
-    for member_info in member_infos {
+    for member_info in filtered_member_infos {
         match resolve_state {
             MemberResolveState::All => {
                 add_member_completion(
                     builder,
                     member_info.clone(),
                     completion_status,
-                    function_count,
+                    overload_count,
                 );
-                if limit_doc_function {
-                    break;
-                }
             }
             MemberResolveState::Meta => {
-                if let Some(feature) = member_info.feature {
-                    if feature.is_meta_decl() {
-                        add_member_completion(
-                            builder,
-                            member_info.clone(),
-                            completion_status,
-                            function_count,
-                        );
-                        if limit_doc_function {
-                            break;
-                        }
-                    }
+                if let Some(feature) = member_info.feature
+                    && feature.is_meta_decl()
+                {
+                    add_member_completion(
+                        builder,
+                        member_info.clone(),
+                        completion_status,
+                        overload_count,
+                    );
                 }
             }
             MemberResolveState::FileDecl => {
-                if let Some(feature) = member_info.feature {
-                    if feature.is_file_decl() {
-                        add_member_completion(
-                            builder,
-                            member_info.clone(),
-                            completion_status,
-                            function_count,
-                        );
-                        if limit_doc_function {
-                            break;
-                        }
-                    }
+                if let Some(feature) = member_info.feature
+                    && feature.is_file_decl()
+                {
+                    add_member_completion(
+                        builder,
+                        member_info.clone(),
+                        completion_status,
+                        overload_count,
+                    );
                 }
             }
         }
@@ -155,30 +153,99 @@ fn add_resolve_member_infos(
     Some(())
 }
 
-fn count_function_overloads(db: &DbIndex, member_infos: &Vec<&LuaMemberInfo>) -> Option<usize> {
-    let mut count = 0;
+/// 过滤成员信息，返回需要的成员列表和重载数量
+fn filter_member_infos<'a>(
+    semantic_model: &SemanticModel,
+    member_infos: &'a Vec<LuaMemberInfo>,
+) -> Option<(Vec<&'a LuaMemberInfo>, Option<usize>)> {
+    if member_infos.is_empty() {
+        return None;
+    }
+
+    let mut file_decl_member: Option<&LuaMemberInfo> = None;
+    let mut member_with_owners: Vec<(&LuaMemberInfo, Option<LuaTypeDeclId>)> =
+        Vec::with_capacity(member_infos.len());
+    let mut all_doc_function = true;
+    let mut overload_count = 0;
+
+    // 一次遍历收集所有信息
     for member_info in member_infos {
+        let owner_id = get_owner_type_id(semantic_model.get_db(), member_info);
+        member_with_owners.push((member_info, owner_id.clone()));
+
+        // 寻找第一个 file_decl 作为参考，如果没有则使用第一个
+        if file_decl_member.is_none()
+            && let Some(feature) = member_info.feature
+            && feature.is_file_decl()
+        {
+            file_decl_member = Some(member_info);
+        }
+
+        // 检查是否全为 DocFunction，同时计算重载数量
         match &member_info.typ {
             LuaType::DocFunction(_) => {
-                count += 1;
+                overload_count += 1;
             }
             LuaType::Signature(id) => {
-                count += 1;
-                if let Some(signature) = db.get_signature_index().get(&id) {
-                    count += signature.overloads.len();
+                all_doc_function = false;
+                overload_count += 1;
+                if let Some(signature) = semantic_model.get_db().get_signature_index().get(id) {
+                    overload_count += signature.overloads.len();
                 }
             }
-            _ => {}
+            _ => {
+                all_doc_function = false;
+            }
         }
     }
-    if count >= 1 {
-        count -= 1;
-    }
-    if count == 0 {
-        None
+
+    // 确定最终使用的参考 owner
+    let final_reference_owner = if let Some(file_decl_member_info) = file_decl_member {
+        // 与第一个成员进行类型检查, 确保子类成员的类型与父类成员的类型一致
+        if let Some((first_member, first_owner)) = member_with_owners.first() {
+            let type_check_result =
+                semantic_model.type_check(&file_decl_member_info.typ, &first_member.typ);
+            if type_check_result.is_ok() {
+                get_owner_type_id(semantic_model.get_db(), file_decl_member_info)
+            } else {
+                first_owner.clone()
+            }
+        } else {
+            get_owner_type_id(semantic_model.get_db(), file_decl_member_info)
+        }
     } else {
-        Some(count)
+        // 没有找到 file_decl，使用第一个成员作为参考
+        member_with_owners
+            .first()
+            .and_then(|(_, owner)| owner.clone())
+    };
+
+    // 过滤出相同 owner_type_id 的成员
+    let mut filtered_member_infos: Vec<&LuaMemberInfo> = member_with_owners
+        .into_iter()
+        .filter_map(|(member_info, owner_id)| {
+            if owner_id == final_reference_owner {
+                Some(member_info)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // 处理重载计数
+    let final_overload_count = if overload_count >= 1 {
+        let count = overload_count - 1;
+        if count == 0 { None } else { Some(count) }
+    } else {
+        None
+    };
+
+    // 如果全为 DocFunction, 只保留第一个
+    if all_doc_function && !filtered_member_infos.is_empty() {
+        filtered_member_infos.truncate(1);
     }
+
+    Some((filtered_member_infos, final_overload_count))
 }
 
 enum MemberResolveState {
@@ -197,4 +264,21 @@ fn get_owner_type_id(db: &DbIndex, info: &LuaMemberInfo) -> Option<LuaTypeDeclId
         }
         _ => None,
     }
+}
+
+fn get_resolve_state(db: &DbIndex, member_infos: &Vec<&LuaMemberInfo>) -> MemberResolveState {
+    let mut resolve_state = MemberResolveState::All;
+    if db.get_emmyrc().strict.meta_override_file_define {
+        for member_info in member_infos.iter() {
+            if let Some(feature) = member_info.feature {
+                if feature.is_meta_decl() {
+                    resolve_state = MemberResolveState::Meta;
+                    break;
+                } else if feature.is_file_decl() {
+                    resolve_state = MemberResolveState::FileDecl;
+                }
+            }
+        }
+    }
+    resolve_state
 }

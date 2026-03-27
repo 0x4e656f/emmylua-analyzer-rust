@@ -6,26 +6,27 @@ mod infer_raw_member;
 use std::collections::HashSet;
 
 use crate::{
+    DbIndex, LuaMemberFeature, LuaMemberId, LuaMemberKey, LuaSemanticDeclId, TypeOps,
     db_index::{LuaType, LuaTypeDeclId},
-    DbIndex, LuaMemberFeature, LuaMemberId, LuaMemberKey, LuaSemanticDeclId,
 };
 use emmylua_parser::{LuaAssignStat, LuaAstNode, LuaSyntaxKind, LuaTableExpr, LuaTableField};
 pub use find_index::find_index_operations;
-pub use find_members::find_members;
+pub use find_members::{find_members, find_members_with_key};
 pub use get_member_map::get_member_map;
 pub use infer_raw_member::infer_raw_member_type;
 
 use super::{
-    infer_node_semantic_decl, infer_table_should_be, InferFailReason, LuaInferCache,
-    SemanticDeclLevel,
+    InferFailReason, LuaInferCache, SemanticDeclLevel, infer_node_semantic_decl,
+    infer_table_should_be,
 };
 
 pub fn get_buildin_type_map_type_id(type_: &LuaType) -> Option<LuaTypeDeclId> {
     match type_ {
-        LuaType::String | LuaType::StringConst(_) | LuaType::DocStringConst(_) => {
-            Some(LuaTypeDeclId::new("string"))
-        }
-        LuaType::Io => Some(LuaTypeDeclId::new("io")),
+        LuaType::String
+        | LuaType::StringConst(_)
+        | LuaType::DocStringConst(_)
+        | LuaType::Language(_) => Some(LuaTypeDeclId::global("string")),
+        LuaType::Io => Some(LuaTypeDeclId::global("io")),
         _ => None,
     }
 }
@@ -41,6 +42,14 @@ pub struct LuaMemberInfo {
 
 type FindMembersResult = Option<Vec<LuaMemberInfo>>;
 type RawGetMemberTypeResult = Result<LuaType, InferFailReason>;
+
+pub(crate) fn intersect_member_types(db: &DbIndex, left: LuaType, right: LuaType) -> LuaType {
+    if left == right {
+        left
+    } else {
+        TypeOps::Intersect.apply(db, &left, &right)
+    }
+}
 
 pub fn find_member_origin_owner(
     db: &DbIndex,
@@ -59,7 +68,7 @@ pub fn find_member_origin_owner(
             break;
         }
 
-        visited_members.insert(current_member_id.clone());
+        visited_members.insert(*current_member_id);
         iteration_count += 1;
 
         match resolve_member_owner(db, infer_config, current_member_id) {
@@ -139,11 +148,10 @@ fn resolve_table_field_through_type_inference(
 
     let field_key = table_field.get_field_key()?;
     let key = LuaMemberKey::from_index_key(db, infer_config, &field_key).ok()?;
-    let member_infos = find_members(db, &table_type)?;
+    let member_infos = find_members_with_key(db, &table_type, key, false)?;
 
     member_infos
-        .iter()
-        .find(|m| m.key == key)?
-        .property_owner_id
-        .clone()
+        .first()
+        .cloned()
+        .and_then(|m| m.property_owner_id)
 }

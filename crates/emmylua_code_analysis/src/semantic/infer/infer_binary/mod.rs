@@ -1,16 +1,18 @@
+mod infer_binary_and;
 mod infer_binary_or;
 
 use emmylua_parser::{BinaryOperator, LuaBinaryExpr};
+use infer_binary_and::{infer_binary_expr_and, special_and_rule};
 use infer_binary_or::{infer_binary_expr_or, special_or_rule};
 use smol_str::SmolStr;
 
 use crate::{
-    check_type_compact,
+    LuaInferCache, TypeOps, check_type_compact,
     db_index::{DbIndex, LuaOperatorMetaMethod, LuaType},
-    LuaInferCache, TypeOps,
+    get_real_type,
 };
 
-use super::{get_custom_type_operator, infer_expr, InferFailReason, InferResult};
+use super::{InferFailReason, InferResult, get_custom_type_operator, infer_expr};
 
 pub fn infer_binary_expr(
     db: &DbIndex,
@@ -21,18 +23,38 @@ pub fn infer_binary_expr(
     let (left, right) = expr.get_exprs().ok_or(InferFailReason::None)?;
     let left_type = infer_expr(db, cache, left.clone())?;
     let right_type = infer_expr(db, cache, right.clone())?;
+    let real_left_type = get_real_type(db, &left_type);
+    let real_right_type = get_real_type(db, &right_type);
+    let left_type_ref = real_left_type.unwrap_or(&left_type);
+    let right_type_ref = real_right_type.unwrap_or(&right_type);
 
-    if op == BinaryOperator::OpOr {
-        if let Some(ty) = special_or_rule(db, &left_type, &right_type, left, right) {
-            return Ok(ty);
+    // Handle special binary operators first
+    match op {
+        BinaryOperator::OpOr => {
+            if let Some(ty) = special_or_rule(db, left_type_ref, right_type_ref, left, right) {
+                return Ok(ty);
+            }
         }
-    } else if !matches!(op, BinaryOperator::OpAnd | BinaryOperator::OpOr) {
-        if let Some(ty) = infer_union_binary_expr(db, op, &left_type, &right_type) {
-            return Ok(ty);
+        BinaryOperator::OpAnd => {
+            if let Some(ty) = special_and_rule(db, left_type_ref, right_type_ref, left, right) {
+                return Ok(ty);
+            }
+        }
+        _ => {
+            if let Some(ty) = infer_union_binary_expr(db, op, left_type_ref, right_type_ref) {
+                return Ok(ty);
+            }
         }
     }
 
-    infer_binary_expr_type(db, left_type, right_type, op)
+    // Use the most specific type references available for inference
+    let (left_ty, right_ty) = match (real_left_type.is_some(), real_right_type.is_some()) {
+        (true, true) => (left_type_ref.clone(), right_type_ref.clone()),
+        (true, false) => (left_type_ref.clone(), right_type),
+        (false, true) => (left_type, right_type_ref.clone()),
+        (false, false) => (left_type, right_type),
+    };
+    infer_binary_expr_type(db, left_ty, right_ty, op)
 }
 
 fn infer_union_binary_expr(
@@ -50,13 +72,16 @@ fn infer_union_binary_expr(
     };
 
     let mut result = LuaType::Unknown;
-    let types = u.get_types();
+    let types = u.into_vec();
     for ty in types.iter() {
-        if let Ok(ty) = if is_left_union {
+        // 只在实际调用时才 clone，而不是预先 clone
+        let ty_result = if is_left_union {
             infer_binary_expr_type(db, ty.clone(), other.clone(), op)
         } else {
             infer_binary_expr_type(db, other.clone(), ty.clone(), op)
-        } {
+        };
+
+        if let Ok(ty) = ty_result {
             result = TypeOps::Union.apply(db, &result, &ty);
         }
     }
@@ -101,8 +126,10 @@ fn infer_binary_custom_operator(
     right: &LuaType,
     op: LuaOperatorMetaMethod,
 ) -> InferResult {
-    let operators = get_custom_type_operator(db, left.clone(), op);
-    if let Some(operators) = operators {
+    // 先检查 left 是否是自定义类型，避免不必要的 clone
+    if left.is_custom_type()
+        && let Some(operators) = get_custom_type_operator(db, left.clone(), op)
+    {
         for operator in operators {
             let operand = operator.get_operand(db);
             if check_type_compact(db, &operand, right).is_ok() {
@@ -111,8 +138,10 @@ fn infer_binary_custom_operator(
         }
     }
 
-    let operators = get_custom_type_operator(db, right.clone(), op);
-    if let Some(operators) = operators {
+    // 再检查 right 是否是自定义类型，只在需要时 clone
+    if right.is_custom_type()
+        && let Some(operators) = get_custom_type_operator(db, right.clone(), op)
+    {
         for operator in operators {
             let operand = operator.get_operand(db);
             if check_type_compact(db, &operand, left).is_ok() {
@@ -150,10 +179,10 @@ fn infer_binary_expr_add(db: &DbIndex, left: LuaType, right: LuaType) -> InferRe
                 Ok(LuaType::FloatConst(num1 + num2))
             }
             (LuaType::IntegerConst(int1), LuaType::FloatConst(num2)) => {
-                Ok(LuaType::FloatConst((*int1 as f64 + *num2).into()))
+                Ok(LuaType::FloatConst(*int1 as f64 + *num2))
             }
             (LuaType::FloatConst(num1), LuaType::IntegerConst(int2)) => {
-                Ok(LuaType::FloatConst((*num1 + *int2 as f64).into()))
+                Ok(LuaType::FloatConst(*num1 + *int2 as f64))
             }
             _ => {
                 if left.is_integer() && right.is_integer() {
@@ -187,10 +216,10 @@ fn infer_binary_expr_sub(db: &DbIndex, left: LuaType, right: LuaType) -> InferRe
                 Ok(LuaType::FloatConst(num1 - num2))
             }
             (LuaType::IntegerConst(int1), LuaType::FloatConst(num2)) => {
-                Ok(LuaType::FloatConst((*int1 as f64 - *num2).into()))
+                Ok(LuaType::FloatConst(*int1 as f64 - *num2))
             }
             (LuaType::FloatConst(num1), LuaType::IntegerConst(int2)) => {
-                Ok(LuaType::FloatConst((*num1 - *int2 as f64).into()))
+                Ok(LuaType::FloatConst(*num1 - *int2 as f64))
             }
             _ => {
                 if left.is_integer() && right.is_integer() {
@@ -215,10 +244,10 @@ fn infer_binary_expr_mul(db: &DbIndex, left: LuaType, right: LuaType) -> InferRe
                 Ok(LuaType::FloatConst(num1 * num2))
             }
             (LuaType::IntegerConst(int1), LuaType::FloatConst(num2)) => {
-                Ok(LuaType::FloatConst((*int1 as f64 * *num2).into()))
+                Ok(LuaType::FloatConst(*int1 as f64 * *num2))
             }
             (LuaType::FloatConst(num1), LuaType::IntegerConst(int2)) => {
-                Ok(LuaType::FloatConst((*num1 * *int2 as f64).into()))
+                Ok(LuaType::FloatConst(*num1 * *int2 as f64))
             }
             _ => {
                 if left.is_integer() && right.is_integer() {
@@ -238,7 +267,11 @@ fn infer_binary_expr_div(db: &DbIndex, left: LuaType, right: LuaType) -> InferRe
         return match (&left, &right) {
             (LuaType::IntegerConst(int1), LuaType::IntegerConst(int2)) => {
                 if *int2 != 0 {
-                    return Ok(LuaType::FloatConst((*int1 as f64 / *int2 as f64).into()));
+                    if int1 % int2 != 0 {
+                        return Ok(LuaType::FloatConst(*int1 as f64 / *int2 as f64));
+                    } else {
+                        return Ok(LuaType::IntegerConst(int1 / int2));
+                    }
                 }
                 Ok(LuaType::Number)
             }
@@ -250,7 +283,7 @@ fn infer_binary_expr_div(db: &DbIndex, left: LuaType, right: LuaType) -> InferRe
             }
             (LuaType::IntegerConst(int1), LuaType::FloatConst(num2)) => {
                 if *num2 != 0.0 {
-                    return Ok(LuaType::FloatConst((*int1 as f64 / *num2).into()));
+                    return Ok(LuaType::FloatConst(*int1 as f64 / *num2));
                 }
                 Ok(LuaType::Number)
             }
@@ -310,7 +343,7 @@ fn infer_binary_expr_pow(db: &DbIndex, left: LuaType, right: LuaType) -> InferRe
                 }
             }
             (LuaType::FloatConst(num1), LuaType::IntegerConst(num2)) => {
-                Ok(LuaType::FloatConst(num1.powf(*num2 as f64).into()))
+                Ok(LuaType::FloatConst(num1.powf(*num2 as f64)))
             }
             _ => Ok(LuaType::Number),
         };
@@ -407,20 +440,6 @@ fn infer_binary_expr_concat(db: &DbIndex, left: LuaType, right: LuaType) -> Infe
     }
 
     infer_binary_custom_operator(db, &left, &right, LuaOperatorMetaMethod::Concat)
-}
-
-fn infer_binary_expr_and(db: &DbIndex, left: LuaType, right: LuaType) -> InferResult {
-    if left.is_always_falsy() {
-        return Ok(left);
-    } else if left.is_always_truthy() {
-        return Ok(right);
-    }
-
-    Ok(TypeOps::Union.apply(
-        db,
-        &TypeOps::NarrowFalseOrNil.apply_source(db, &left),
-        &right,
-    ))
 }
 
 fn infer_cmp_expr(_: &DbIndex, left: LuaType, right: LuaType, op: BinaryOperator) -> InferResult {

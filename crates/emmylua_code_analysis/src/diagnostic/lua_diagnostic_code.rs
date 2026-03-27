@@ -1,4 +1,5 @@
 use emmylua_diagnostic_macro::LuaDiagnosticMacro;
+use emmylua_parser::LuaLanguageLevel;
 use lsp_types::DiagnosticSeverity;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -17,7 +18,7 @@ pub enum DiagnosticCode {
     /// Missing return statement
     MissingReturn,
     /// Param Type not match
-    ParamTypeNotMatch,
+    ParamTypeMismatch,
     /// Missing parameter
     MissingParameter,
     /// Redundant parameter
@@ -64,6 +65,8 @@ pub enum DiagnosticCode {
     UndefinedDocParam,
     /// Duplicate doc field
     DuplicateDocField,
+    /// Unknown doc annotation
+    UnknownDocTag,
     /// Missing fields
     MissingFields,
     /// Inject Field
@@ -94,7 +97,28 @@ pub enum DiagnosticCode {
     GenericConstraintMismatch,
     /// cast-type-mismatch
     CastTypeMismatch,
-
+    /// unresolved-require
+    UnresolvedRequire,
+    /// require-module-not-visible
+    RequireModuleNotVisible,
+    /// enum-value-mismatch
+    EnumValueMismatch,
+    /// preferred-local-alias
+    PreferredLocalAlias,
+    /// readonly
+    ReadOnly,
+    /// Global variable defined in non-module scope
+    GlobalInNonModule,
+    /// attribute-param-type-mismatch
+    AttributeParamTypeMismatch,
+    /// attribute-missing-parameter
+    AttributeMissingParameter,
+    /// attribute-redundant-parameter
+    AttributeRedundantParameter,
+    /// invert-if
+    InvertIf,
+    /// Call to a non-callable value
+    CallNonCallable,
     #[serde(other)]
     None,
 }
@@ -106,7 +130,7 @@ pub fn get_default_severity(code: DiagnosticCode) -> DiagnosticSeverity {
         DiagnosticCode::DocSyntaxError => DiagnosticSeverity::ERROR,
         DiagnosticCode::TypeNotFound => DiagnosticSeverity::WARNING,
         DiagnosticCode::MissingReturn => DiagnosticSeverity::WARNING,
-        DiagnosticCode::ParamTypeNotMatch => DiagnosticSeverity::WARNING,
+        DiagnosticCode::ParamTypeMismatch => DiagnosticSeverity::WARNING,
         DiagnosticCode::MissingParameter => DiagnosticSeverity::WARNING,
         DiagnosticCode::UnreachableCode => DiagnosticSeverity::HINT,
         DiagnosticCode::Unused => DiagnosticSeverity::HINT,
@@ -120,17 +144,21 @@ pub fn get_default_severity(code: DiagnosticCode) -> DiagnosticSeverity {
         DiagnosticCode::AnnotationUsageError => DiagnosticSeverity::ERROR,
         DiagnosticCode::RedefinedLocal => DiagnosticSeverity::HINT,
         DiagnosticCode::DuplicateRequire => DiagnosticSeverity::HINT,
+        DiagnosticCode::UnresolvedRequire => DiagnosticSeverity::WARNING,
+        DiagnosticCode::IterVariableReassign => DiagnosticSeverity::ERROR,
+        DiagnosticCode::PreferredLocalAlias => DiagnosticSeverity::HINT,
+        DiagnosticCode::CallNonCallable => DiagnosticSeverity::WARNING,
         _ => DiagnosticSeverity::WARNING,
     }
 }
 
-pub fn is_code_default_enable(code: &DiagnosticCode) -> bool {
+pub fn is_code_default_enable(code: &DiagnosticCode, level: LuaLanguageLevel) -> bool {
     match code {
-        DiagnosticCode::IterVariableReassign => false,
+        DiagnosticCode::IterVariableReassign => level >= LuaLanguageLevel::Lua55,
         DiagnosticCode::CodeStyleCheck => false,
         DiagnosticCode::IncompleteSignatureDoc => false,
         DiagnosticCode::MissingGlobalDoc => false,
-
+        DiagnosticCode::UnknownDocTag => false,
         // ... handle other variants
 
         // neovim-code-style

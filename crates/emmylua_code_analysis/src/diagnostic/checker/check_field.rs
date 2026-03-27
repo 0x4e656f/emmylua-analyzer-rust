@@ -6,10 +6,11 @@ use emmylua_parser::{
 };
 
 use crate::{
-    enum_variable_is_param, DiagnosticCode, InferFailReason, LuaMemberKey, LuaType, SemanticModel,
+    DbIndex, DiagnosticCode, InferFailReason, LuaAliasCallKind, LuaAliasCallType, LuaMemberKey,
+    LuaType, SemanticModel, enum_variable_is_param, get_keyof_members,
 };
 
-use super::{humanize_lint_type, Checker, DiagnosticContext};
+use super::{Checker, DiagnosticContext, humanize_lint_type};
 
 pub struct CheckFieldChecker;
 
@@ -63,7 +64,7 @@ fn check_index_expr(
         .infer_expr(index_expr.get_prefix_expr()?)
         .unwrap_or(LuaType::Unknown);
 
-    if !is_valid_prefix_type(&prefix_typ) {
+    if is_invalid_prefix_type(&prefix_typ) {
         return Some(());
     }
 
@@ -81,7 +82,7 @@ fn check_index_expr(
                 index_key.get_range()?,
                 t!(
                     "Fields cannot be injected into the reference of `%{class}` for `%{field}`. ",
-                    class = humanize_lint_type(&db, &prefix_typ),
+                    class = humanize_lint_type(db, &prefix_typ),
                     field = index_name,
                 )
                 .to_string(),
@@ -102,7 +103,7 @@ fn check_index_expr(
     Some(())
 }
 
-fn is_valid_prefix_type(typ: &LuaType) -> bool {
+fn is_invalid_prefix_type(typ: &LuaType) -> bool {
     let mut current_typ = typ;
     loop {
         match current_typ {
@@ -111,16 +112,16 @@ fn is_valid_prefix_type(typ: &LuaType) -> bool {
             | LuaType::Table
             | LuaType::TplRef(_)
             | LuaType::StrTplRef(_)
-            | LuaType::TableConst(_) => return false,
+            | LuaType::TableConst(_) => return true,
             LuaType::Instance(instance_typ) => {
                 current_typ = instance_typ.get_base();
             }
-            _ => return true,
+            _ => return false,
         }
     }
 }
 
-fn is_valid_member(
+pub(super) fn is_valid_member(
     semantic_model: &SemanticModel,
     prefix_typ: &LuaType,
     index_expr: &LuaIndexExpr,
@@ -130,7 +131,7 @@ fn is_valid_member(
     match prefix_typ {
         LuaType::Global | LuaType::Userdata => return Some(()),
         LuaType::Array(typ) => {
-            if typ.is_unknown() {
+            if typ.get_base().is_unknown() {
                 return Some(());
             }
         }
@@ -151,7 +152,7 @@ fn is_valid_member(
                 match prefix_typ {
                     LuaType::Ref(id) | LuaType::Def(id) => {
                         if let Some(decl) =
-                            semantic_model.get_db().get_type_index().get_type_decl(&id)
+                            semantic_model.get_db().get_type_index().get_type_decl(id)
                         {
                             // enum 仍然需要检查
                             if decl.is_enum() {
@@ -171,7 +172,14 @@ fn is_valid_member(
     let need_add_diagnostic =
         match semantic_model.get_semantic_info(index_expr.syntax().clone().into()) {
             Some(info) => {
-                let need = info.semantic_decl.is_none() && info.typ.is_unknown();
+                let mut need = info.semantic_decl.is_none();
+                if need {
+                    let decl_type = semantic_model.get_index_decl_type(index_expr.clone());
+                    if decl_type.is_some_and(|typ| !typ.is_unknown()) {
+                        need = false;
+                    };
+                }
+
                 need
             }
             None => true,
@@ -206,20 +214,16 @@ fn is_valid_member(
     };
 
     // 一些类型组合需要特殊处理
-    match (prefix_typ, &key_type) {
-        (LuaType::Def(id), _) => {
-            if let Some(decl) = semantic_model.get_db().get_type_index().get_type_decl(id) {
-                if decl.is_class() {
-                    if code == DiagnosticCode::InjectField {
-                        return Some(());
-                    }
-                    if index_key.is_string() || matches!(key_type, LuaType::String) {
-                        return Some(());
-                    }
-                }
-            }
+    if let (LuaType::Def(id), _) = (prefix_typ, &key_type)
+        && let Some(decl) = semantic_model.get_db().get_type_index().get_type_decl(id)
+        && decl.is_class()
+    {
+        if code == DiagnosticCode::InjectField {
+            return Some(());
         }
-        _ => {}
+        if index_key.is_string() || matches!(key_type, LuaType::String) {
+            return Some(());
+        }
     }
 
     /*
@@ -228,7 +232,7 @@ fn is_valid_member(
             local field
             local a = Class[field]
     */
-    let key_types = get_key_types(&key_type);
+    let key_types = get_key_types(&semantic_model.get_db(), &key_type);
     if key_types.is_empty() {
         return None;
     }
@@ -246,10 +250,8 @@ fn is_valid_member(
                             {
                                 return Some(());
                             }
-                        } else if typ.is_integer() {
-                            if key_types.iter().any(|typ| typ.is_integer()) {
-                                return Some(());
-                            }
+                        } else if typ.is_integer() && key_types.iter().any(|typ| typ.is_integer()) {
+                            return Some(());
                         }
                     }
                     LuaMemberKey::Name(_) => {
@@ -270,23 +272,34 @@ fn is_valid_member(
             }
             if members.is_empty() {
                 // 当没有任何成员信息且是 enum 类型时, 需要检查参数是否为自己
-                if let LuaType::Ref(id) | LuaType::Def(id) = prefix_type {
-                    if let Some(decl) = semantic_model.get_db().get_type_index().get_type_decl(&id)
-                    {
-                        if decl.is_enum() {
-                            if key_types.iter().any(|typ| match typ {
-                                LuaType::Ref(key_id) | LuaType::Def(key_id) => id == *key_id,
-                                _ => false,
-                            }) {
-                                return Some(());
-                            }
-                        }
-                    }
+                if check_enum_self_reference(semantic_model, &prefix_type, &key_types).is_some() {
+                    return Some(());
                 }
             }
+        } else if check_enum_self_reference(semantic_model, &prefix_type, &key_types).is_some() {
+            return Some(());
         }
     }
 
+    None
+}
+
+/// 检查枚举类型的自引用
+fn check_enum_self_reference(
+    semantic_model: &SemanticModel,
+    prefix_type: &LuaType,
+    key_types: &HashSet<LuaType>,
+) -> Option<()> {
+    if let LuaType::Ref(id) | LuaType::Def(id) = prefix_type
+        && let Some(decl) = semantic_model.get_db().get_type_index().get_type_decl(id)
+        && decl.is_enum()
+        && key_types.iter().any(|typ| match typ {
+            LuaType::Ref(key_id) | LuaType::Def(key_id) => *id == *key_id,
+            _ => false,
+        })
+    {
+        return Some(());
+    }
     None
 }
 
@@ -302,7 +315,7 @@ fn get_prefix_types(prefix_typ: &LuaType) -> HashSet<LuaType> {
         visited.insert(current_type.clone());
         match &current_type {
             LuaType::Union(union_typ) => {
-                for t in union_typ.get_types() {
+                for t in union_typ.into_vec() {
                     stack.push(t.clone());
                 }
             }
@@ -315,7 +328,7 @@ fn get_prefix_types(prefix_typ: &LuaType) -> HashSet<LuaType> {
     type_set
 }
 
-fn get_key_types(typ: &LuaType) -> HashSet<LuaType> {
+fn get_key_types(db: &DbIndex, typ: &LuaType) -> HashSet<LuaType> {
     let mut type_set = HashSet::new();
     let mut stack = vec![typ.clone()];
     let mut visited = HashSet::new();
@@ -333,12 +346,22 @@ fn get_key_types(typ: &LuaType) -> HashSet<LuaType> {
                 type_set.insert(current_type);
             }
             LuaType::Union(union_typ) => {
-                for t in union_typ.get_types() {
+                for t in union_typ.into_vec() {
                     stack.push(t.clone());
                 }
             }
             LuaType::StrTplRef(_) | LuaType::Ref(_) => {
                 type_set.insert(current_type);
+            }
+            LuaType::DocStringConst(_) | LuaType::DocIntegerConst(_) => {
+                type_set.insert(current_type);
+            }
+            LuaType::Call(alias_call) => {
+                if let Some(key_types) = get_keyof_keys(db, alias_call) {
+                    for t in key_types {
+                        stack.push(t.clone());
+                    }
+                }
             }
             _ => {}
         }
@@ -368,21 +391,19 @@ fn in_conditional_statement<T: LuaAstNode>(node: &T) -> bool {
     for ancestor in node.syntax().ancestors() {
         match ancestor.kind().into() {
             LuaSyntaxKind::IfStat => {
-                if let Some(if_stat) = LuaIfStat::cast(ancestor) {
-                    if let Some(condition_expr) = if_stat.get_condition_expr() {
-                        if condition_expr.get_range().contains_range(node_range) {
-                            return true;
-                        }
-                    }
+                if let Some(if_stat) = LuaIfStat::cast(ancestor)
+                    && let Some(condition_expr) = if_stat.get_condition_expr()
+                    && condition_expr.get_range().contains_range(node_range)
+                {
+                    return true;
                 }
             }
             LuaSyntaxKind::WhileStat => {
-                if let Some(while_stat) = LuaWhileStat::cast(ancestor) {
-                    if let Some(condition_expr) = while_stat.get_condition_expr() {
-                        if condition_expr.get_range().contains_range(node_range) {
-                            return true;
-                        }
-                    }
+                if let Some(while_stat) = LuaWhileStat::cast(ancestor)
+                    && let Some(condition_expr) = while_stat.get_condition_expr()
+                    && condition_expr.get_range().contains_range(node_range)
+                {
+                    return true;
                 }
             }
             LuaSyntaxKind::ForStat => {
@@ -404,21 +425,19 @@ fn in_conditional_statement<T: LuaAstNode>(node: &T) -> bool {
                 }
             }
             LuaSyntaxKind::RepeatStat => {
-                if let Some(repeat_stat) = LuaRepeatStat::cast(ancestor) {
-                    if let Some(condition_expr) = repeat_stat.get_condition_expr() {
-                        if condition_expr.get_range().contains_range(node_range) {
-                            return true;
-                        }
-                    }
+                if let Some(repeat_stat) = LuaRepeatStat::cast(ancestor)
+                    && let Some(condition_expr) = repeat_stat.get_condition_expr()
+                    && condition_expr.get_range().contains_range(node_range)
+                {
+                    return true;
                 }
             }
             LuaSyntaxKind::ElseIfClauseStat => {
-                if let Some(elseif_clause) = LuaElseIfClauseStat::cast(ancestor) {
-                    if let Some(condition_expr) = elseif_clause.get_condition_expr() {
-                        if condition_expr.get_range().contains_range(node_range) {
-                            return true;
-                        }
-                    }
+                if let Some(elseif_clause) = LuaElseIfClauseStat::cast(ancestor)
+                    && let Some(condition_expr) = elseif_clause.get_condition_expr()
+                    && condition_expr.get_range().contains_range(node_range)
+                {
+                    return true;
                 }
             }
             _ => {}
@@ -434,8 +453,28 @@ fn check_enum_is_param(
 ) -> Option<()> {
     enum_variable_is_param(
         semantic_model.get_db(),
-        &mut semantic_model.get_config().borrow_mut(),
+        &mut semantic_model.get_cache().borrow_mut(),
         index_expr,
         prefix_typ,
     )
+}
+
+fn get_keyof_keys(db: &DbIndex, alias_call: &LuaAliasCallType) -> Option<Vec<LuaType>> {
+    if alias_call.get_call_kind() != LuaAliasCallKind::KeyOf {
+        return None;
+    }
+    let source_operands = alias_call.get_operands().iter().collect::<Vec<_>>();
+    if source_operands.len() != 1 {
+        return None;
+    }
+    let members = get_keyof_members(db, &source_operands[0]).unwrap_or_default();
+    let key_types = members
+        .iter()
+        .filter_map(|m| match &m.key {
+            LuaMemberKey::Integer(i) => Some(LuaType::DocIntegerConst(*i)),
+            LuaMemberKey::Name(s) => Some(LuaType::DocStringConst(s.clone().into())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    Some(key_types)
 }

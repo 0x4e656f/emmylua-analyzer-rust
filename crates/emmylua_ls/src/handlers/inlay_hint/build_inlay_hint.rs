@@ -2,12 +2,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use emmylua_code_analysis::{
-    FileId, InferGuard, LuaFunctionType, LuaMemberId, LuaMemberKey, LuaOperatorId,
-    LuaOperatorMetaMethod, LuaSemanticDeclId, LuaType, SemanticModel,
+    AsyncState, FileId, InferGuard, LuaFunctionType, LuaMember, LuaMemberId, LuaMemberKey,
+    LuaMemberOwner, LuaOperatorId, LuaOperatorMetaMethod, LuaSemanticDeclId, LuaType, LuaTypeDecl,
+    SemanticModel,
 };
 use emmylua_parser::{
-    LuaAst, LuaAstNode, LuaCallExpr, LuaExpr, LuaFuncStat, LuaIndexExpr, LuaLocalFuncStat,
-    LuaLocalName, LuaLocalStat, LuaStat, LuaSyntaxId, LuaVarExpr,
+    LuaAst, LuaAstNode, LuaCallExpr, LuaExpr, LuaFuncStat, LuaIndexExpr, LuaIndexKey,
+    LuaLiteralToken, LuaLocalFuncStat, LuaLocalName, LuaLocalStat, LuaStat, LuaSyntaxId,
+    LuaVarExpr,
 };
 use emmylua_parser::{LuaAstToken, LuaTokenKind};
 use lsp_types::{InlayHint, InlayHintKind, InlayHintLabel, InlayHintLabelPart, Location};
@@ -15,10 +17,15 @@ use rowan::NodeOrToken;
 
 use rowan::TokenAtOffset;
 
+use crate::context::ClientId;
+use crate::handlers::completion::get_index_alias_name;
 use crate::handlers::definition::compare_function_types;
 use crate::handlers::inlay_hint::build_function_hint::{build_closure_hint, build_label_parts};
 
-pub fn build_inlay_hints(semantic_model: &SemanticModel) -> Option<Vec<InlayHint>> {
+pub fn build_inlay_hints(
+    semantic_model: &SemanticModel,
+    client_id: ClientId,
+) -> Option<Vec<InlayHint>> {
     let mut result = Vec::new();
     let root = semantic_model.get_root();
     for node in root.clone().descendants::<LuaAst>() {
@@ -29,13 +36,20 @@ pub fn build_inlay_hints(semantic_model: &SemanticModel) -> Option<Vec<InlayHint
             LuaAst::LuaCallExpr(call_expr) => {
                 build_call_expr_param_hint(semantic_model, &mut result, call_expr.clone());
                 build_call_expr_await_hint(semantic_model, &mut result, call_expr.clone());
-                build_call_expr_meta_call_hint(semantic_model, &mut result, call_expr);
+                build_call_expr_meta_call_hint(semantic_model, &mut result, call_expr.clone());
+                build_enum_param_hint(semantic_model, &mut result, call_expr);
             }
             LuaAst::LuaLocalName(local_name) => {
                 build_local_name_hint(semantic_model, &mut result, local_name);
             }
             LuaAst::LuaFuncStat(func_stat) => {
+                if client_id.is_intellij() {
+                    continue;
+                }
                 build_func_stat_override_hint(semantic_model, &mut result, func_stat);
+            }
+            LuaAst::LuaIndexExpr(index_expr) => {
+                build_index_expr_hint(semantic_model, &mut result, index_expr);
             }
             _ => {}
         }
@@ -137,7 +151,7 @@ fn build_call_expr_await_hint(
 
     match semantic_info.typ {
         LuaType::DocFunction(f) => {
-            if f.is_async() {
+            if f.get_async_state() == AsyncState::Async {
                 let range = call_expr.get_range();
                 let document = semantic_model.get_document();
                 let lsp_range = document.to_lsp_range(range)?;
@@ -159,7 +173,7 @@ fn build_call_expr_await_hint(
                 .get_db()
                 .get_signature_index()
                 .get(&signature_id)?;
-            if signature.is_async {
+            if signature.async_state == AsyncState::Async {
                 let range = call_expr.get_range();
                 let document = semantic_model.get_document();
                 let lsp_range = document.to_lsp_range(range)?;
@@ -189,7 +203,6 @@ fn build_call_args_for_func_type(
     func_type: &LuaFunctionType,
     params_location: Option<HashMap<String, Location>>,
 ) -> Option<()> {
-    let call_args_len = call_args.len();
     let mut params = func_type
         .get_params()
         .iter()
@@ -202,7 +215,7 @@ fn build_call_args_for_func_type(
             params.insert(0, "self".to_string());
         }
         (true, false) => {
-            if params.len() > 0 {
+            if !params.is_empty() {
                 params.remove(0);
             }
         }
@@ -210,12 +223,12 @@ fn build_call_args_for_func_type(
     }
 
     for (idx, name) in params.iter().enumerate() {
-        if idx >= call_args_len {
+        if idx >= call_args.len() {
             break;
         }
 
         if name == "..." {
-            for i in idx..call_args_len {
+            for (i, arg) in call_args.into_iter().enumerate().skip(idx) {
                 let label_name = format!("var{}:", i - idx);
                 let label = if let Some(params_location) = &params_location {
                     if let Some(location) = params_location.get(name) {
@@ -231,7 +244,6 @@ fn build_call_args_for_func_type(
                     InlayHintLabel::String(label_name)
                 };
 
-                let arg = &call_args[i];
                 let range = arg.get_range();
                 let document = semantic_model.get_document();
                 let lsp_range = document.to_lsp_range(range)?;
@@ -251,13 +263,12 @@ fn build_call_args_for_func_type(
         }
 
         let arg = &call_args[idx];
-        if let LuaExpr::NameExpr(name_expr) = arg {
-            if let Some(param_name) = name_expr.get_name_text() {
-                // optimize like rust analyzer
-                if &param_name == name {
-                    continue;
-                }
-            }
+        if let LuaExpr::NameExpr(name_expr) = arg
+            && let Some(param_name) = name_expr.get_name_text()
+            // optimize like rust analyzer
+            && &param_name == name
+        {
+            continue;
         }
 
         let document = semantic_model.get_document();
@@ -311,12 +322,11 @@ fn build_local_name_hint(
             let local_stat = LuaLocalStat::cast(parent)?;
             let local_names = local_stat.get_local_name_list();
             for (i, ln) in local_names.enumerate() {
-                if local_name == ln {
-                    if let Some(value_expr) = local_stat.get_value_exprs().nth(i) {
-                        if let LuaExpr::ClosureExpr(_) = value_expr {
-                            return Some(());
-                        }
-                    }
+                if local_name == ln
+                    && let Some(value_expr) = local_stat.get_value_exprs().nth(i)
+                    && let LuaExpr::ClosureExpr(_) = value_expr
+                {
+                    return Some(());
                 }
             }
         }
@@ -330,7 +340,7 @@ fn build_local_name_hint(
 
     // 目前没时间完善结合 ast 的类型过滤, 所以只允许一些类型显示
     match typ {
-        LuaType::Def(_) | LuaType::Ref(_) => {}
+        LuaType::Ref(_) | LuaType::Generic(_) => {}
         _ => {
             return Some(());
         }
@@ -368,7 +378,7 @@ fn build_func_stat_override_hint(
     let func_name = func_stat.get_func_name()?;
     if let LuaVarExpr::IndexExpr(index_expr) = func_name {
         let prefix_expr = index_expr.get_prefix_expr()?;
-        let prefix_type = semantic_model.infer_expr(prefix_expr.into()).ok()?;
+        let prefix_type = semantic_model.infer_expr(prefix_expr).ok()?;
         if let LuaType::Def(id) = prefix_type {
             let supers = semantic_model
                 .get_db()
@@ -377,10 +387,10 @@ fn build_func_stat_override_hint(
 
             let index_key = index_expr.get_index_key()?;
             let member_key: LuaMemberKey = semantic_model.get_member_key(&index_key)?;
-            let infer_guard = &mut InferGuard::new();
+            let guard = InferGuard::new();
             for super_type in supers {
                 if let Some(member_id) =
-                    get_super_member_id(semantic_model, super_type, &member_key, infer_guard)
+                    get_super_member_id(semantic_model, super_type, &member_key, &guard)
                 {
                     let member = semantic_model
                         .get_db()
@@ -423,28 +433,30 @@ fn build_func_stat_override_hint(
     Some(())
 }
 
-fn get_super_member_id(
+pub fn get_super_member_id(
     semantic_model: &SemanticModel,
     super_type: LuaType,
     member_key: &LuaMemberKey,
-    infer_guard: &mut InferGuard,
+    infer_guard: &InferGuard,
 ) -> Option<LuaMemberId> {
-    if let LuaType::Ref(super_type_id) = &super_type {
-        infer_guard.check(super_type_id).ok()?;
-        let member_map = semantic_model.get_member_info_map(&super_type)?;
+    let super_type_id = match &super_type {
+        LuaType::Ref(id) => id,
+        LuaType::Generic(generic) => generic.get_base_type_id_ref(),
+        _ => return None,
+    };
+    infer_guard.check(super_type_id).ok()?;
+    let member_map = semantic_model.get_member_info_map(&super_type)?;
 
-        if let Some(member_infos) = member_map.get(&member_key) {
-            let first_property = member_infos.first()?.property_owner_id.clone()?;
-            if let LuaSemanticDeclId::Member(member_id) = first_property {
-                return Some(member_id);
-            }
+    if let Some(member_infos) = member_map.get(member_key) {
+        let first_property = member_infos.first()?.property_owner_id.clone()?;
+        if let LuaSemanticDeclId::Member(member_id) = first_property {
+            return Some(member_id);
         }
     }
-
     None
 }
 
-fn get_override_lsp_location(
+pub fn get_override_lsp_location(
     semantic_model: &SemanticModel,
     file_id: FileId,
     syntax_id: LuaSyntaxId,
@@ -538,7 +550,7 @@ fn set_meta_call_part(
         ("new".to_string(), call_expr.get_range(), Some(true))
     } else {
         (
-            "⚡".to_string(),
+            ":call".to_string(),
             call_expr.get_prefix_expr()?.get_range(),
             None,
         )
@@ -607,8 +619,241 @@ fn find_match_meta_call_operator_id(
                 .unwrap_or(false);
 
         if is_match {
-            return Some((operator_id.clone(), operator_func));
+            return Some((*operator_id, operator_func));
         }
     }
     operator_ids.first().cloned().map(|id| (id, call_func))
+}
+
+fn build_index_expr_hint(
+    semantic_model: &SemanticModel,
+    result: &mut Vec<InlayHint>,
+    index_expr: LuaIndexExpr,
+) -> Option<()> {
+    if !semantic_model.get_emmyrc().hint.index_hint {
+        return Some(());
+    }
+
+    // 只处理整数索引
+    let index_key = index_expr.get_index_key()?;
+    if !matches!(index_key, LuaIndexKey::Integer(_)) {
+        return Some(());
+    }
+
+    // 获取前缀表达式的类型信息
+    let prefix_expr = index_expr.get_prefix_expr()?;
+    let prefix_type = semantic_model.infer_expr(prefix_expr).ok()?;
+    let member_key = semantic_model.get_member_key(&index_key)?;
+
+    let member_infos = semantic_model.get_member_info_with_key(&prefix_type, member_key, false)?;
+    let member_info = member_infos.first()?;
+    // 尝试提取别名
+    let alias = get_index_alias_name(semantic_model, member_info)?;
+    // 创建 hint
+    let document = semantic_model.get_document();
+    let position = {
+        let index_token = index_expr.get_index_name_token()?;
+        let range = index_token.text_range();
+        let lsp_range = document.to_lsp_range(range)?;
+        lsp_range.end
+    };
+
+    let label_location = {
+        let range = index_expr.get_index_key()?.get_range()?;
+        let lsp_range = document.to_lsp_range(range)?;
+        Location::new(document.get_uri(), lsp_range)
+    };
+
+    let hint = InlayHint {
+        kind: Some(InlayHintKind::TYPE),
+        label: InlayHintLabel::LabelParts(vec![InlayHintLabelPart {
+            value: format!(": {}", alias),
+            location: Some(label_location),
+            ..Default::default()
+        }]),
+        position,
+        text_edits: None,
+        tooltip: None,
+        padding_left: Some(true),
+        padding_right: None,
+        data: None,
+    };
+
+    result.push(hint);
+    Some(())
+}
+
+fn build_enum_param_hint(
+    semantic_model: &SemanticModel,
+    result: &mut Vec<InlayHint>,
+    call_expr: LuaCallExpr,
+) -> Option<()> {
+    if !semantic_model.get_emmyrc().hint.enum_param_hint {
+        return Some(());
+    }
+
+    let func_type = semantic_model.infer_call_expr_func(call_expr.clone(), None)?;
+    let call_args = call_expr.get_args_list()?.get_args().collect::<Vec<_>>();
+    let params = func_type.get_params();
+
+    let colon_call = call_expr.is_colon_call();
+    let colon_define = func_type.is_colon_define();
+
+    let param_offset: i32 = match (colon_call, colon_define) {
+        (true, false) => 1,
+        (false, true) => -1,
+        _ => 0,
+    };
+
+    for (i, arg) in call_args.iter().enumerate() {
+        let param_index = i as i32 + param_offset;
+        if param_index < 0 {
+            continue;
+        }
+        process_enum_hint_for_arg(semantic_model, result, arg, params, param_index as usize);
+    }
+
+    Some(())
+}
+
+fn process_enum_hint_for_arg(
+    semantic_model: &SemanticModel,
+    result: &mut Vec<InlayHint>,
+    arg: &LuaExpr,
+    params: &[(String, Option<LuaType>)],
+    param_index: usize,
+) -> Option<()> {
+    let (_, param_type) = params.get(param_index)?;
+    let param_type = param_type.as_ref()?;
+
+    let type_id = match param_type {
+        LuaType::Ref(id) => id,
+        _ => return None,
+    };
+
+    let type_decl = semantic_model
+        .get_db()
+        .get_type_index()
+        .get_type_decl(type_id)?;
+    if !type_decl.is_enum() {
+        return None;
+    }
+
+    // 推断参数类型
+    let arg_type = semantic_model.infer_expr(arg.clone()).ok()?;
+
+    // 查找对应的枚举成员
+    let member_decl = find_matching_enum_member(semantic_model, type_decl, &arg_type)?;
+    let member_name = member_decl.get_key().to_path();
+
+    match arg {
+        LuaExpr::LiteralExpr(literal_expr) => {
+            if let Some(literal_token) = literal_expr.get_literal() {
+                match literal_token {
+                    LuaLiteralToken::String(string_token) => {
+                        if string_token.get_value() == member_name {
+                            return None;
+                        }
+                    }
+                    LuaLiteralToken::Number(number_token) => {
+                        if number_token.is_int() {
+                            let number_value = format!("[{}]", number_token.get_number_value());
+                            if number_value == member_name {
+                                return None;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        LuaExpr::NameExpr(name_expr) => {
+            if let Some(arg_name) = name_expr.get_name_text() {
+                if member_name == arg_name {
+                    return None;
+                }
+                // 名称里包含了枚举名和成员名(忽略大小写)也不显示提示
+                let lower_arg_name = arg_name.to_lowercase();
+                let lower_enum_name = type_decl.get_name().to_lowercase();
+                let lower_member_name = member_name.to_lowercase();
+                if lower_arg_name.contains(&lower_enum_name)
+                    && lower_arg_name.contains(&lower_member_name)
+                {
+                    return None;
+                }
+            }
+        }
+        LuaExpr::IndexExpr(index_expr) => {
+            // 对索引访问需要完全匹配尾名称
+            if let Some(index_name_token) = index_expr.get_index_name_token()
+                && let Some(name_token) =
+                    emmylua_parser::LuaNameToken::cast(index_name_token.clone())
+            {
+                let index_name = name_token.get_name_text();
+                if index_name == member_name {
+                    return None;
+                }
+            }
+        }
+        _ => {}
+    }
+
+    let enum_name = type_decl.get_name();
+    let hint_text = format!("{}.{}", enum_name, member_name);
+
+    let document = semantic_model.get_document();
+    let range = arg.get_range();
+    let lsp_range = document.to_lsp_range(range)?;
+
+    let hint = InlayHint {
+        kind: Some(InlayHintKind::PARAMETER),
+        label: InlayHintLabel::String(hint_text),
+        position: lsp_range.end,
+        text_edits: None,
+        tooltip: None,
+        padding_left: Some(true),
+        padding_right: None,
+        data: None,
+    };
+    result.push(hint);
+
+    Some(())
+}
+
+fn find_matching_enum_member<'a>(
+    semantic_model: &'a SemanticModel,
+    type_decl: &LuaTypeDecl,
+    arg_type: &LuaType,
+) -> Option<&'a LuaMember> {
+    let enum_member_owner = LuaMemberOwner::Type(type_decl.get_id());
+    let enum_members = semantic_model
+        .get_db()
+        .get_member_index()
+        .get_members(&enum_member_owner)?;
+    let is_enum_key = type_decl.is_enum_key();
+
+    for member_decl in enum_members {
+        let is_match = if is_enum_key {
+            let member_key = member_decl.get_key();
+            match (member_key, arg_type) {
+                (LuaMemberKey::Name(s), LuaType::StringConst(arg_s)) => s == arg_s.as_ref(),
+                (LuaMemberKey::Integer(i), LuaType::IntegerConst(arg_i)) => *i == *arg_i,
+                (LuaMemberKey::ExprType(typ), _) => typ == arg_type,
+                _ => false,
+            }
+        } else if let Some(type_cache) = semantic_model
+            .get_db()
+            .get_type_index()
+            .get_type_cache(&member_decl.get_id().into())
+        {
+            type_cache.as_type() == arg_type
+        } else {
+            false
+        };
+
+        if is_match {
+            return Some(member_decl);
+        }
+    }
+    None
 }

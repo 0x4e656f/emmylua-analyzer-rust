@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    sync::{atomic::AtomicI32, Arc},
+    sync::{Arc, atomic::AtomicI32},
 };
 
 use lsp_server::{Connection, Message, Notification, RequestId, Response};
@@ -12,7 +12,7 @@ use lsp_types::{
 use serde::de::DeserializeOwned;
 use tokio::{
     select,
-    sync::{oneshot, Mutex},
+    sync::{Mutex, oneshot},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -39,7 +39,7 @@ impl ClientProxy {
         }));
     }
 
-    async fn send_request(
+    pub async fn send_request(
         &self,
         id: RequestId,
         method: &str,
@@ -78,7 +78,7 @@ impl ClientProxy {
         Some(())
     }
 
-    fn next_id(&self) -> RequestId {
+    pub fn next_id(&self) -> RequestId {
         let id = self
             .id_counter
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -150,5 +150,14 @@ impl ClientProxy {
             .send_request(request_id, "workspace/applyEdit", params, cancel_token)
             .await?;
         serde_json::from_value(r.result?).ok()
+    }
+
+    pub fn send_request_no_response(&self, method: &str, params: impl serde::Serialize) {
+        let request_id = self.next_id();
+        self.send_request_no_wait(request_id, method, params);
+    }
+
+    pub fn refresh_workspace_diagnostics(&self) {
+        self.send_request_no_response("workspace/diagnostic/refresh", ());
     }
 }

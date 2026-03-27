@@ -1,6 +1,5 @@
 #[cfg(test)]
 mod test {
-
     use crate::{DiagnosticCode, LuaType, VirtualWorkspace};
 
     #[test]
@@ -36,7 +35,7 @@ mod test {
         ws.def(
             r#"
         ---@class Object
-        
+
         ---@class T
         local inject2class ---@type (Object| T)?
         if jsonClass then
@@ -94,10 +93,10 @@ mod test {
         end
 
         if type(props.bar) == 'function' then
-            local foo = props.bar() 
+            local foo = props.bar()
         end
 
-        local foo = props.bar and props.bar() or nil 
+        local foo = props.bar and props.bar() or nil
         "#
         ));
     }
@@ -122,7 +121,7 @@ mod test {
     fn test_issue_93() {
         let mut ws = VirtualWorkspace::new_with_init_std_lib();
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
         local text    --- @type string[]?
         if staged then
@@ -168,7 +167,7 @@ mod test {
     fn test_issue_162() {
         let mut ws = VirtualWorkspace::new();
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
             --- @class Foo
             --- @field a? fun()
@@ -241,7 +240,7 @@ print(a.field)
         let mut ws = VirtualWorkspace::new();
 
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
         --- @class A
         --- @field b integer
@@ -257,6 +256,92 @@ print(a.field)
         foo(a)
         "#
         ));
+    }
+
+    #[test]
+    fn test_doc_function_assignment_narrowing0() {
+        let mut ws = VirtualWorkspace::new();
+
+        let code = r#"
+        local i --- @type integer|fun():string
+        i = "str"
+        A = i
+        "#;
+
+        ws.def(code);
+        let a = ws.expr_ty("A");
+        let a_desc = ws.humanize_type_detailed(a);
+        assert_eq!(a_desc, "\"str\"");
+    }
+
+    #[test]
+    fn test_doc_member_assignment_prefers_annotation_source() {
+        let mut ws = VirtualWorkspace::new();
+
+        let code = r#"
+        local t = {}
+        t.a = "hello"
+        ---@type string|number
+        t.a = 1
+        b = t.a
+        "#;
+
+        ws.def(code);
+        assert_eq!(ws.expr_ty("b"), ws.ty("integer"));
+    }
+
+    #[test]
+    fn test_assignment_narrow_drops_nil_on_mismatch() {
+        let mut ws = VirtualWorkspace::new();
+
+        let code = r#"
+        local a ---@type string?
+        a = 1
+        b = a
+        "#;
+
+        ws.def(code);
+        assert_eq!(ws.expr_ty("b"), LuaType::IntegerConst(1));
+    }
+
+    #[test]
+    fn test_doc_member_assignment_falls_back_to_annotation() {
+        let mut ws = VirtualWorkspace::new();
+
+        ws.def(
+            r#"
+            local t = {}
+            ---@type string|number
+            t.a = true
+            b = t.a
+        "#,
+        );
+
+        let b = ws.expr_ty("b");
+        let expected_ty = ws.ty("string|number");
+        let expected = ws.humanize_type(expected_ty);
+        assert_eq!(ws.humanize_type(b), expected);
+    }
+
+    #[test]
+    fn test_doc_function_assignment_narrowing() {
+        let mut ws = VirtualWorkspace::new();
+
+        let code = r#"
+        local i --- @type integer|fun():string
+        i = function() end
+        _ = i()
+        A = i
+        "#;
+
+        ws.def(code);
+
+        assert!(ws.check_code_for(DiagnosticCode::CallNonCallable, code));
+        assert!(ws.check_code_for(DiagnosticCode::NeedCheckNil, code));
+
+        let a = ws.expr_ty("A");
+        let a_desc = ws.humanize_type_detailed(a);
+        assert_eq!(a_desc, "fun()");
     }
 
     #[test]
@@ -311,8 +396,8 @@ end
         function baz() end
 
         local a
-        a = baz() -- a has type nil but should be string    
-        d = a    
+        a = baz() -- a has type nil but should be string
+        d = a
         "#
         ));
 
@@ -334,7 +419,7 @@ end
             end
 
             a = t
-        end   
+        end
         "#,
         );
 
@@ -359,6 +444,146 @@ end
         let a = ws.expr_ty("a");
         let a_desc = ws.humanize_type(a);
         assert_eq!(a_desc, "integer");
+    }
+
+    #[test]
+    fn test_issue_921_or_with_empty_table() {
+        let mut ws = VirtualWorkspace::new();
+
+        ws.def(
+            r#"
+            --- @class Opts
+            --- @field a? string
+
+            local opts --- @type Opts?
+
+            -- Test expression type: opts or {} should narrow to Opts
+            E = opts or {}
+            "#,
+        );
+
+        let e_ty = ws.expr_ty("E");
+        assert_eq!(ws.humanize_type(e_ty), "Opts");
+    }
+
+    #[test]
+    fn test_issue_921_or_with_table_type() {
+        let mut ws = VirtualWorkspace::new();
+
+        ws.def(
+            r#"
+            local opts --- @type table?
+
+            -- Test with plain table? type
+            E = opts or {}
+            "#,
+        );
+
+        let e_ty = ws.expr_ty("E");
+        assert_eq!(ws.humanize_type(e_ty), "table");
+    }
+
+    #[test]
+    fn test_issue_921_self_assignment_with_table() {
+        let mut ws = VirtualWorkspace::new();
+
+        ws.def(
+            r#"
+            local opts --- @type table?
+
+            opts = opts or {}
+
+            E = opts
+            "#,
+        );
+
+        let e_ty = ws.expr_ty("E");
+        assert_eq!(ws.humanize_type(e_ty), "table");
+    }
+
+    #[test]
+    fn test_issue_921_self_assignment_with_class_empty_table() {
+        let mut ws = VirtualWorkspace::new();
+
+        ws.def(
+            r#"
+            --- @class Opts
+            --- @field a? string
+
+            local opts0 --- @type Opts?
+            local opts1 --- @type Opts?
+
+            opts0 = opts0 or {}
+            opts1 = opts0 or { a = 'a' }
+
+            E0 = opts0
+            E1 = opts1
+            "#,
+        );
+
+        // After self-assignment opts = opts or {}, opts should be narrowed to Opts
+        let e0_ty = ws.expr_ty("E0");
+        assert_eq!(ws.humanize_type(e0_ty), "Opts");
+        let e1_ty = ws.expr_ty("E1");
+        assert_eq!(ws.humanize_type(e1_ty), "Opts");
+    }
+
+    #[test]
+    fn test_issue_921_and_with_string_nullable() {
+        let mut ws = VirtualWorkspace::new();
+
+        ws.def(
+            r#"
+            --- @class Opts
+            --- @field a? string
+
+            local opts --- @type Opts
+
+            -- When opts.a is string?, result should be table|nil
+            -- The table {'a'} is inferred as a tuple containing 'a'
+            E = opts.a and { 'a' }
+            "#,
+        );
+
+        let e_ty = ws.expr_ty("E");
+        assert_eq!(ws.humanize_type(e_ty), r#"("a")?"#);
+    }
+
+    #[test]
+    fn test_issue_921_and_with_boolean_nullable_table() {
+        let mut ws = VirtualWorkspace::new();
+
+        ws.def(
+            r#"
+            --- @class Opts
+            --- @field b? boolean
+
+            local opts --- @type Opts
+
+            -- When opts.b is boolean?, result should be false|nil|table
+            E = opts.b and { 'b' }
+            "#,
+        );
+
+        let e_ty = ws.expr_ty("E");
+        assert_eq!(ws.humanize_type(e_ty), r#"(false|("b"))?"#);
+    }
+
+    #[test]
+    fn test_issue_921_and_with_boolean_nullable_string() {
+        let mut ws = VirtualWorkspace::new();
+
+        ws.def(
+            r#"
+            local bool --- @type boolean?
+
+            -- When bool is boolean?, result should be false|nil|'a'
+            E = bool and 'a'
+            "#,
+        );
+
+        let e_ty = ws.expr_ty("E");
+        assert_eq!(ws.humanize_type(e_ty), r#"(false|"a")?"#);
     }
 
     #[test]
@@ -450,6 +675,30 @@ end
     }
 
     #[test]
+    fn test_narrow_after_error_branches() {
+        let mut ws = VirtualWorkspace::new();
+
+        ws.def(
+            r#"
+        local r --- @type string?
+        local a --- @type boolean
+        if not r then
+            if a then
+                error()
+            else
+                error()
+            end
+        end
+
+        b = r -- should be string
+        "#,
+        );
+
+        let b = ws.expr_ty("b");
+        assert_eq!(b, LuaType::String);
+    }
+
+    #[test]
     fn test_unknown_type() {
         let mut ws = VirtualWorkspace::new();
 
@@ -461,7 +710,7 @@ end
         );
 
         let b = ws.expr_ty("b");
-        let b_expected = ws.ty("unknown");
+        let b_expected = ws.ty("nil");
         assert_eq!(b, b_expected);
     }
 
@@ -497,7 +746,7 @@ end
             ---@param data D10.data
             local function init(data)
                 ---@cast data table
-                
+
                 b = data -- data 现在仍为 `10.data` 而不是 `table`
             end
             "#,
@@ -630,15 +879,15 @@ end
             local function isInteger(n)
                 return true
             end
-            
+
             local a ---@type integer | string
-            
+
             if isInteger(a) then
                 d = a
             else
                 e = a
-            end 
-            
+            end
+
         "#,
         );
 
@@ -799,7 +1048,743 @@ end
         );
 
         let res = ws.expr_ty("res");
-        let res_desc = ws.humanize_type(res);
-        assert_eq!(res_desc, "(string[]|string)");
+        let expected_ty = ws.ty("string|string[]");
+        assert_eq!(res, expected_ty);
+    }
+
+    #[test]
+    fn test_issue_480() {
+        let mut ws = VirtualWorkspace::new_with_init_std_lib();
+
+        ws.check_code_for(
+            DiagnosticCode::UnnecessaryAssert,
+            r#"
+            --- @param a integer?
+            --- @param c boolean
+            function foo(a, c)
+                if c then
+                    a = 1
+                end
+
+                assert(a)
+            end
+            "#,
+        );
+    }
+
+    #[test]
+    fn test_issue_526() {
+        let mut ws = VirtualWorkspace::new();
+
+        ws.def(
+            r#"
+            --- @alias A { kind: 'A'}
+            --- @alias B { kind: 'B'}
+
+            local x --- @type A|B
+
+            if x.kind == 'A' then
+                a = x
+                return
+            end
+
+            b = x
+            "#,
+        );
+
+        let a = ws.expr_ty("a");
+        let a_expected = ws.ty("A");
+        assert_eq!(a, a_expected);
+        let b = ws.expr_ty("b");
+        let b_expected = ws.ty("B");
+        assert_eq!(b, b_expected);
+    }
+
+    #[test]
+    fn test_issue_583() {
+        let mut ws = VirtualWorkspace::new_with_init_std_lib();
+
+        ws.check_code_for(
+            DiagnosticCode::AssignTypeMismatch,
+            r#"
+            --- @param sha string
+            local function get_hash_color(sha)
+            local r, g, b = sha:match('(%x)%x(%x)%x(%x)')
+            assert(r and g and b, 'Invalid hash color')
+            local _ = r --- @type string
+            local _ = g --- @type string
+            local _ = b --- @type string
+            end
+            "#,
+        );
+    }
+
+    #[test]
+    fn test_issue_584() {
+        let mut ws = VirtualWorkspace::new_with_init_std_lib();
+
+        ws.check_code_for(
+            DiagnosticCode::AssignTypeMismatch,
+            r#"
+            local function foo()
+                for _ in ipairs({}) do
+                    break
+                end
+
+                local a
+                if a == nil then
+                    a = 1
+                    local _ = a --- @type integer
+                end
+            end
+            "#,
+        );
+    }
+
+    #[test]
+    fn test_feature_inherit_flow_from_const_local() {
+        let mut ws = VirtualWorkspace::new_with_init_std_lib();
+
+        ws.def(
+            r#"
+            local ret --- @type string | nil
+
+            local h = type(ret) == "string"
+            if h then
+                a = ret
+            end
+
+            local e = type(ret)
+            if e == "string" then
+                b = ret
+            end
+            "#,
+        );
+
+        let a = ws.expr_ty("a");
+        let a_expected = ws.ty("string");
+        assert_eq!(a, a_expected);
+        let b = ws.expr_ty("b");
+        let b_expected = ws.ty("string");
+        assert_eq!(b, b_expected);
+    }
+
+    #[test]
+    fn test_feature_generic_type_guard() {
+        let mut ws = VirtualWorkspace::new();
+
+        ws.def(
+            r#"
+            ---@generic T
+            ---@param type `T`
+            ---@return TypeGuard<T>
+            local function instanceOf(inst, type)
+                return true
+            end
+
+            local ret --- @type string | nil
+
+            if instanceOf(ret, "string") then
+                a = ret
+            end
+            "#,
+        );
+
+        let a = ws.expr_ty("a");
+        let a_expected = ws.ty("string");
+        assert_eq!(a, a_expected);
+    }
+
+    #[test]
+    fn test_issue_598() {
+        let mut ws = VirtualWorkspace::new_with_init_std_lib();
+        ws.def(
+            r#"
+            ---@class A<T>
+            A = {}
+            ---@class IDisposable
+            ---@class B<T>: IDisposable
+
+            ---@class AnonymousObserver<T>: IDisposable
+
+            ---@generic T
+            ---@return AnonymousObserver<T>
+            function createAnonymousObserver()
+            end
+            "#,
+        );
+        assert!(ws.check_code_for(
+            DiagnosticCode::ReturnTypeMismatch,
+            r#"
+                ---@param observer fun(value: T) | B<T>
+                ---@return IDisposable
+                function A:subscribe(observer)
+                    local typ = type(observer)
+                    if typ == 'function' then
+                        ---@cast observer fun(value: T)
+                        observer = createAnonymousObserver()
+                    elseif typ == 'table' then
+                        ---@cast observer -function
+                        observer = createAnonymousObserver()
+                    end
+
+                    return observer
+                end
+            "#,
+        ));
+
+        assert!(!ws.check_code_for(
+            DiagnosticCode::ReturnTypeMismatch,
+            r#"
+                ---@param observer fun(value: T) | B<T>
+                ---@return IDisposable
+                function A:test2(observer)
+                    local typ = type(observer)
+                    if typ == 'table' then
+                        ---@cast observer -function
+                        observer = createAnonymousObserver()
+                    end
+
+                    return observer
+                end
+            "#,
+        ));
+    }
+
+    #[test]
+    fn test_issue_524() {
+        let mut ws = VirtualWorkspace::new();
+        ws.def(
+            r#"
+            ---@type string[]
+            local d = {}
+
+            if #d == 2 then
+                a = d[1]
+                b = d[2]
+                c = d[3]
+            end
+
+            for i = 1, #d do
+                e = d[i]
+            end
+            "#,
+        );
+
+        let a = ws.expr_ty("a");
+        let a_expected = ws.ty("string");
+        assert_eq!(a, a_expected);
+        let b = ws.expr_ty("b");
+        let b_expected = ws.ty("string");
+        assert_eq!(b, b_expected);
+        let c = ws.expr_ty("c");
+        let c_expected = ws.ty("string?");
+        assert_eq!(c, c_expected);
+        let e = ws.expr_ty("e");
+        let e_expected = ws.ty("string");
+        assert_eq!(e, e_expected);
+    }
+
+    #[test]
+    fn test_issue_600() {
+        let mut ws = VirtualWorkspace::new();
+        assert!(ws.check_code_for(
+            DiagnosticCode::NeedCheckNil,
+            r#"
+            ---@class Test2
+            ---@field test string[]
+            ---@field test2? string
+            local a = {}
+            if a.test[1] and a.test[1].char(123) then
+
+            end
+            "#,
+        ));
+    }
+
+    #[test]
+    fn test_issue_585() {
+        let mut ws = VirtualWorkspace::new_with_init_std_lib();
+        assert!(ws.check_code_for(
+            DiagnosticCode::AssignTypeMismatch,
+            r#"
+            local a --- @type type?
+
+            if type(a) == 'string' then
+                local _ = a --- @type type
+            end
+            "#,
+        ));
+    }
+
+    #[test]
+    fn test_issue_627() {
+        let mut ws = VirtualWorkspace::new();
+        ws.def(
+            r#"
+            ---@class A
+            ---@field type "point"
+            ---@field handle number
+
+            ---@class B
+            ---@field type "unit"
+            ---@field handle string
+
+            ---@param a number
+            function testA(a)
+            end
+            ---@param a string
+            function testB(a)
+            end
+            "#,
+        );
+        assert!(ws.check_code_for(
+            DiagnosticCode::ParamTypeMismatch,
+            r#"
+                ---@param target A | B
+                function test(target)
+                    if target.type == 'point' then
+                        testA(target.handle)
+                    end
+                    if target.type == 'unit' then
+                        testB(target.handle)
+                    end
+                end
+            "#,
+        ));
+    }
+
+    #[test]
+    fn test_issue_622() {
+        let mut ws = VirtualWorkspace::new();
+        ws.def(
+            r#"
+            ---@class Test.A
+            ---@field base number
+            ---@field add number
+            T = {}
+
+            ---@enum Test.op
+            Op = {
+                base = "base",
+                add = "add",
+            };
+            "#,
+        );
+        ws.def(
+            r#"
+            ---@param op Test.op
+            ---@param value number
+            ---@return boolean
+            function T:SetValue(op, value)
+                local oldValue = self[op]
+                if oldValue == value then
+                    return false
+                end
+                A = oldValue
+                return true
+            end
+            "#,
+        );
+        let a = ws.expr_ty("A");
+        assert_eq!(ws.humanize_type(a), "number");
+    }
+
+    #[test]
+    fn test_nil_1() {
+        let mut ws = VirtualWorkspace::new();
+        ws.def(
+            r#"
+            ---@type number?
+            local angle
+
+            if angle ~= nil and angle >= 0 then
+                A = angle
+            end
+
+            "#,
+        );
+        let a = ws.expr_ty("A");
+        assert_eq!(ws.humanize_type(a), "number");
+    }
+
+    #[test]
+    fn test_type_narrow() {
+        let mut ws = VirtualWorkspace::new();
+        ws.def(
+            r#"
+            ---@generic T: table
+            ---@param obj T | function
+            ---@return T?
+            function bindGC(obj)
+                if type(obj) == 'table' then
+                    A = obj
+                end
+            end
+            "#,
+        );
+
+        // Note: we can't use `ws.ty_expr("A")` to get a true type of `A`
+        // because `infer_global_type` will not allow generic variables
+        // from `bindGC` to escape into global space.
+        let db = &ws.analysis.compilation.db;
+        let decl_id = db
+            .get_global_index()
+            .get_global_decl_ids("A")
+            .unwrap()
+            .first()
+            .unwrap()
+            .clone();
+        let typ = db
+            .get_type_index()
+            .get_type_cache(&decl_id.into())
+            .unwrap()
+            .as_type();
+
+        assert_eq!(ws.humanize_type(typ.clone()), "T");
+    }
+
+    #[test]
+    fn test_issue_630() {
+        let mut ws = VirtualWorkspace::new_with_init_std_lib();
+        ws.def(
+            r#"
+            ---@class A
+            ---@field Abc string?
+            A = {}
+            "#,
+        );
+        ws.def(
+            r#"
+            function A:test()
+                if not rawget(self, 'Abc') then
+                    self.Abc = "a"
+                end
+
+                B = self.Abc
+                C = self
+            end
+            "#,
+        );
+        let a = ws.expr_ty("B");
+        assert_eq!(ws.humanize_type(a), "string");
+        let c = ws.expr_ty("C");
+        assert_eq!(ws.humanize_type(c), "A");
+    }
+
+    #[test]
+    fn test_error_function() {
+        let mut ws = VirtualWorkspace::new_with_init_std_lib();
+        assert!(ws.check_code_for(
+            DiagnosticCode::NeedCheckNil,
+            r#"
+                ---@class Result
+                ---@field value string?
+                Result = {}
+
+                function getValue()
+                    ---@type Result?
+                    local result
+
+                    if result then
+                        error(result.value)
+                    end
+                end
+            "#,
+        ));
+    }
+
+    #[test]
+    fn test_array_flow() {
+        let mut ws = VirtualWorkspace::new_with_init_std_lib();
+        assert!(ws.check_code_for(
+            DiagnosticCode::NeedCheckNil,
+            r#"
+            for i = 1, #_G.arg do
+                print(_G.arg[i].char())
+            end
+            "#,
+        ));
+    }
+
+    #[test]
+    fn test_issue_641() {
+        let mut ws = VirtualWorkspace::new_with_init_std_lib();
+        assert!(ws.check_code_for(
+            DiagnosticCode::AssignTypeMismatch,
+            r#"
+            local b --- @type boolean
+            local tar = b and 'a' or 'b'
+
+            if tar == 'a' then
+            end
+
+            --- @type 'a'|'b'
+            local _ = tar
+            "#,
+        ));
+    }
+
+    #[test]
+    fn test_self_1() {
+        let mut ws = VirtualWorkspace::new();
+        ws.def(
+            r#"
+            ---@class Node
+            ---@field parent? Node
+
+            ---@class Subject<T>: Node
+            ---@field package root? Node
+            Subject = {}
+            "#,
+        );
+        ws.def(
+            r#"
+            function Subject:add()
+                if self == self.parent then
+                    A = self
+                end
+            end
+            "#,
+        );
+        let a = ws.expr_ty("A");
+        assert_eq!(ws.humanize_type(a), "Node");
+    }
+
+    #[test]
+    fn test_return_cast_multi_file() {
+        let mut ws = VirtualWorkspace::new();
+        ws.def_file(
+            "test.lua",
+            r#"
+            local M = {}
+
+            --- @return boolean
+            --- @return_cast _obj function
+            function M.is_callable(_obj) end
+
+            return M
+            "#,
+        );
+        ws.def(
+            r#"
+            local test = require("test")
+
+            local obj
+
+            if test.is_callable(obj) then
+                o = obj
+            end
+            "#,
+        );
+        let a = ws.expr_ty("o");
+        let expected = LuaType::Function;
+        assert_eq!(a, expected);
+    }
+
+    #[test]
+    fn test_issue_734() {
+        let mut ws = VirtualWorkspace::new();
+        assert!(ws.check_code_for(
+            DiagnosticCode::AssignTypeMismatch,
+            r#"
+local a --- @type string[]
+
+assert(#a >= 1)
+
+--- @type string
+_ = a[1]
+
+assert(#a == 1)
+
+--- @type string
+_ = a[1]
+
+--- @type string
+_2 = a[1]
+            "#
+        ));
+    }
+
+    #[test]
+    fn test_return_cast_with_fallback() {
+        let mut ws = VirtualWorkspace::new();
+
+        ws.def(
+            r#"
+            ---@class Creature
+
+            ---@class Player: Creature
+
+            ---@class Monster: Creature
+
+            ---@return boolean
+            ---@return_cast creature Player else Monster
+            local function isPlayer(creature)
+                return true
+            end
+
+            local creature ---@type Creature
+
+            if isPlayer(creature) then
+                a = creature
+            else
+                b = creature
+            end
+            "#,
+        );
+
+        let a = ws.expr_ty("a");
+        let a_expected = ws.ty("Player");
+        assert_eq!(a, a_expected);
+
+        let b = ws.expr_ty("b");
+        let b_expected = ws.ty("Monster");
+        assert_eq!(b, b_expected);
+    }
+
+    #[test]
+    fn test_return_cast_with_fallback_self() {
+        let mut ws = VirtualWorkspace::new();
+
+        ws.def(
+            r#"
+            ---@class Creature
+
+            ---@class Player: Creature
+
+            ---@class Monster: Creature
+            local m = {}
+
+            ---@return boolean
+            ---@return_cast self Player else Monster
+            function m:isPlayer()
+            end
+
+            if m:isPlayer() then
+                a = m
+            else
+                b = m
+            end
+            "#,
+        );
+
+        let a = ws.expr_ty("a");
+        let a_expected = ws.ty("Player");
+        assert_eq!(a, a_expected);
+
+        let b = ws.expr_ty("b");
+        let b_expected = ws.ty("Monster");
+        assert_eq!(b, b_expected);
+    }
+
+    #[test]
+    fn test_return_cast_backward_compatibility() {
+        let mut ws = VirtualWorkspace::new();
+
+        ws.def(
+            r#"
+            ---@return boolean
+            ---@return_cast n integer
+            local function isInteger(n)
+                return true
+            end
+
+            local a ---@type integer | string
+
+            if isInteger(a) then
+                d = a
+            else
+                e = a
+            end
+            "#,
+        );
+
+        let d = ws.expr_ty("d");
+        let d_expected = ws.ty("integer");
+        assert_eq!(d, d_expected);
+
+        // Should still use the original behavior (remove integer from union)
+        let e = ws.expr_ty("e");
+        let e_expected = ws.ty("string");
+        assert_eq!(e, e_expected);
+    }
+
+    #[test]
+    fn test_issue_868() {
+        let mut ws = VirtualWorkspace::new();
+
+        ws.check_code_for(
+            DiagnosticCode::AssignTypeMismatch,
+            r#"
+            local a --- @type string|{foo:boolean, bar:string}
+
+            if a.foo then
+                --- @type string
+                local _ = a.bar
+            end
+            "#,
+        );
+    }
+
+    #[test]
+    fn test_or_empty_table_non_table_compatible() {
+        let mut ws = VirtualWorkspace::new();
+
+        ws.def(
+            r#"
+            local a --- @type string?
+
+            -- When left type is NOT table-compatible, should not narrow
+            E = a or {}
+            "#,
+        );
+
+        let e_ty = ws.expr_ty("E");
+        // string? or {} results in string|table (empty table becomes table)
+        assert_eq!(ws.humanize_type(e_ty), "(string|table)");
+    }
+
+    #[test]
+    fn test_or_empty_table_with_nonempty_class() {
+        let mut ws = VirtualWorkspace::new();
+
+        ws.def(
+            r#"
+            --- @class MyClass
+            --- @field x number
+
+            local obj --- @type MyClass?
+
+            E = obj or {}
+            "#,
+        );
+
+        let e_ty = ws.expr_ty("E");
+        assert_eq!(ws.humanize_type(e_ty), "(MyClass|table)");
+    }
+
+    #[test]
+    fn test_or_empty_table_union_of_tables() {
+        let mut ws = VirtualWorkspace::new();
+
+        ws.def(
+            r#"
+            --- @class A
+            --- @field a number
+
+            --- @class B
+            --- @field b string
+
+            local obj --- @type (A|B)?
+
+            -- Union of class types is table-compatible
+            E = obj or {}
+            "#,
+        );
+
+        let e_ty = ws.expr_ty("E");
+        let type_str = ws.humanize_type_detailed(e_ty);
+        assert_eq!(type_str, "(A|B|table)");
     }
 }

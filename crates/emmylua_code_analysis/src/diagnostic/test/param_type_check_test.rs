@@ -9,13 +9,13 @@ mod test {
         let mut ws = VirtualWorkspace::new();
 
         assert!(!ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
             ---@alias F1 fun(x: integer):integer
             do
                 ---@type F1
                 local test = function(x) return x + 1 end
-                
+
                 test("wrong type")
             end
         "#
@@ -27,7 +27,7 @@ mod test {
         let mut ws = VirtualWorkspace::new();
 
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
             ---@generic F: function
             ---@param _a F|integer
@@ -46,14 +46,14 @@ mod test {
         let mut ws = VirtualWorkspace::new_with_init_std_lib();
 
         assert!(!ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
             local a, b = pcall(string.rep, "a", "w")
         "#
         ));
 
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
             local a, b = pcall(string.rep, "a", 10000)
         "#
@@ -65,7 +65,7 @@ mod test {
         let mut ws = VirtualWorkspace::new();
 
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
         ---@param a table | nil
         local function foo(a)
@@ -87,7 +87,7 @@ mod test {
         let mut ws = VirtualWorkspace::new();
 
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
         ---@param _a string[]
         local function bar(_a) end
@@ -115,7 +115,7 @@ mod test {
         let mut ws = VirtualWorkspace::new();
 
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
         ---@param _t table<any, string>
         local function foo(_t) end
@@ -135,7 +135,7 @@ mod test {
         let mut ws = VirtualWorkspace::new_with_init_std_lib();
 
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
             ---@enum Baz
             local asd = {
@@ -161,7 +161,7 @@ mod test {
         let mut ws = VirtualWorkspace::new();
 
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
         local Table = {}
 
@@ -196,14 +196,14 @@ mod test {
         );
 
         assert!(!ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
         mergeInto({}, 1)
         "#
         ));
 
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
         mergeInto({}, {}, {})
         "#
@@ -215,7 +215,7 @@ mod test {
         let mut ws = VirtualWorkspace::new_with_init_std_lib();
 
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
         ---@param _kind '' | 'Nr' | 'Ln' | 'Cul'
         function foo(_kind) end
@@ -232,7 +232,7 @@ mod test {
         let mut ws = VirtualWorkspace::new_with_init_std_lib();
 
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
         local range ---@type { [1]: integer, [2]: integer }
 
@@ -246,7 +246,7 @@ mod test {
         let mut ws = VirtualWorkspace::new();
 
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
         ---@alias A
         ---| "number" # A number
@@ -265,7 +265,7 @@ mod test {
         let mut ws = VirtualWorkspace::new();
 
         assert!(!ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
             ---@class Test
             local Test = {}
@@ -279,7 +279,7 @@ mod test {
         ));
 
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
             ---@class Test
             local Test = {}
@@ -288,7 +288,7 @@ mod test {
             function Test.dots(...)
             end
 
-            Test:dots("a", "b", "c") 
+            Test:dots("a", "b", "c")
         "#
         ));
     }
@@ -298,7 +298,7 @@ mod test {
         let mut ws = VirtualWorkspace::new_with_init_std_lib();
 
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
             local a = (''):format()
         "#
@@ -310,7 +310,7 @@ mod test {
         let mut ws = VirtualWorkspace::new_with_init_std_lib();
 
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
             local d = select(1, 1, 2, 3)
         "#
@@ -322,7 +322,7 @@ mod test {
         let mut ws = VirtualWorkspace::new();
 
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
         --- @param _x string|true
         function foo(_x) end
@@ -337,7 +337,7 @@ mod test {
         let mut ws = VirtualWorkspace::new_with_init_std_lib();
 
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
             ---@param sorter function
             ---@return string[]
@@ -355,7 +355,7 @@ mod test {
         let mut ws = VirtualWorkspace::new_with_init_std_lib();
 
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
                 ---@generic K, V
                 ---@param t table<K, V>
@@ -377,7 +377,7 @@ mod test {
         let mut ws = VirtualWorkspace::new_with_init_std_lib();
 
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
                 ---@param t table
                 local function bar(t)
@@ -398,7 +398,7 @@ mod test {
         let mut ws = VirtualWorkspace::new_with_init_std_lib();
 
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
                 ---@param t table[]
                 local function bar(t)
@@ -417,7 +417,7 @@ mod test {
         let mut ws = VirtualWorkspace::new_with_init_std_lib();
 
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
                 ---@diagnostic disable: missing-return
                 ---@generic K, V
@@ -440,7 +440,7 @@ mod test {
     fn test_issue_278() {
         let mut ws = VirtualWorkspace::new_with_init_std_lib();
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
         local a --- @type type|'callable'
         error(a)  -- expected `string` but found `(type|"callable")`
@@ -449,12 +449,30 @@ mod test {
     }
 
     #[test]
+    fn test_issue_696() {
+        let mut ws = VirtualWorkspace::new_with_init_std_lib();
+        assert!(ws.check_code_for(
+            DiagnosticCode::ParamTypeMismatch,
+            r#"
+        local ty --- @type type|fun(x:any): boolean
+
+        --- @param _ty fun(v:any):boolean
+        local function validate(_ty) end
+
+        if type(ty) == 'function' then
+          validate(ty)
+        end
+        "#
+        ));
+    }
+
+    #[test]
     fn test_4() {
         let mut ws = VirtualWorkspace::new();
 
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
-            r#" 
+            DiagnosticCode::ParamTypeMismatch,
+            r#"
             ---@class D13.Meta
             ---@field __defineGet fun(self: self, key: string, f: fun(self: self): any)
 
@@ -473,14 +491,14 @@ mod test {
     fn test_issue_286() {
         let mut ws = VirtualWorkspace::new();
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
                 local a --- @type boolean
                 local b --- @type integer?
                 local c = a and b or nil
                 -- type of c is (nil|true), should be (integer|nil)
                 local d = a and b
-                -- type of d is (boolean|nil), should be (false|integer|nil) 
+                -- type of d is (boolean|nil), should be (false|integer|nil)
 
                 ---@param p integer?
                 local function f1(p)
@@ -499,14 +517,14 @@ mod test {
     fn test_issue_287() {
         let mut ws = VirtualWorkspace::new();
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
                 ---@param a table
                 local function f(a)
                 end
 
                 ---@type table?
-                local a 
+                local a
                 a = a or {}
 
                 f(a)
@@ -519,7 +537,7 @@ mod test {
         let mut ws = VirtualWorkspace::new();
 
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
             --- @param b string
             --- @param c? boolean
@@ -537,7 +555,7 @@ mod test {
         let mut ws = VirtualWorkspace::new_with_init_std_lib();
 
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
                 local a --- @type type|'a'
                 string.len(a)
@@ -550,7 +568,7 @@ mod test {
         let mut ws = VirtualWorkspace::new_with_init_std_lib();
 
         assert!(!ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
                 ---@class py.ETypeMeta
 
@@ -578,7 +596,7 @@ mod test {
         let mut ws = VirtualWorkspace::new();
 
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
             ---@class py.Area
             ---@class py.RecArea: py.Area
@@ -600,7 +618,7 @@ mod test {
     fn test_super_1() {
         let mut ws = VirtualWorkspace::new();
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
                 ---@class py.SlotType: integer
 
@@ -620,7 +638,7 @@ mod test {
     fn test_alias_union_enum() {
         let mut ws = VirtualWorkspace::new();
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
                 ---@alias EventType
                 ---| GlobalEventType
@@ -655,7 +673,7 @@ mod test {
     fn test_alias_union_enum_2() {
         let mut ws = VirtualWorkspace::new();
         assert!(!ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
                 ---@alias EventType
                 ---| GlobalEventType
@@ -690,11 +708,11 @@ mod test {
     fn test_empty_class() {
         let mut ws = VirtualWorkspace::new();
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
                 ---@class D4.A: table<integer, string>
 
-                ---@param lua_conf D4.A 
+                ---@param lua_conf D4.A
                 local function enable_global_lua_trigger(lua_conf) end
 
                 ---@return { on_event: fun(trigger: table,  actor, data), [integer]: string }
@@ -711,7 +729,7 @@ mod test {
     fn test_super_and_enum_1() {
         let mut ws = VirtualWorkspace::new();
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
                 ---@enum AbilityType
                 local AbilityType = {
@@ -737,7 +755,7 @@ mod test {
     fn test_super_and_enum_2() {
         let mut ws = VirtualWorkspace::new();
         assert!(!ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
                 ---@enum AbilityType
                 local AbilityType = {
@@ -763,7 +781,7 @@ mod test {
     fn test_generic_array() {
         let mut ws = VirtualWorkspace::new();
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
             ---@class LocalTimer
 
@@ -783,7 +801,7 @@ mod test {
     fn test_function_union() {
         let mut ws = VirtualWorkspace::new();
         assert!(!ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
                 ---@class (partial) D21.A
                 local M
@@ -820,7 +838,7 @@ mod test {
     fn test_function_union_2() {
         let mut ws = VirtualWorkspace::new();
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
                 ---@class (partial) D21.A
                 local M
@@ -868,7 +886,7 @@ mod test {
             "#,
         );
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
                 ---@class (partial) D21.A
                 local M
@@ -902,7 +920,7 @@ mod test {
     fn test_function_self() {
         let mut ws = VirtualWorkspace::new();
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
                 ---@class D23.A
 
@@ -939,7 +957,7 @@ mod test {
             "#,
         );
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
             local A = require("1")
 
@@ -964,7 +982,7 @@ mod test {
         ws.analysis.update_config(Arc::new(emmyrc));
 
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
                 ---@class Trigger
                 ---@alias Trigger.CallBack fun(trg: Trigger, ...): any, any, any, any
@@ -994,7 +1012,7 @@ mod test {
     fn test_issue_487() {
         let mut ws = VirtualWorkspace::new_with_init_std_lib();
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
             ---@param start string
             ---@return boolean
@@ -1009,7 +1027,7 @@ mod test {
     fn test_int() {
         let mut ws = VirtualWorkspace::new();
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
             ---@param count integer
             local function loop_count(count)
@@ -1028,11 +1046,11 @@ mod test {
         ws.analysis.update_config(Arc::new(emmyrc));
 
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
                 ---@alias IdAlias
-                ---| 311000001 
-                ---| 311000002 
+                ---| 311000001
+                ---| 311000002
 
                 ---@param id IdAlias
                 local function f(id)
@@ -1053,7 +1071,7 @@ mod test {
         ws.analysis.update_config(Arc::new(emmyrc));
 
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
                 ---@enum SlotType
                 local SlotType = {
@@ -1083,7 +1101,7 @@ mod test {
     fn test_enum_value_matching_2() {
         let mut ws = VirtualWorkspace::new_with_init_std_lib();
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
                 ---@enum DamageType
                 local DamageType = {
@@ -1098,7 +1116,7 @@ mod test {
     fn test_super_type_match() {
         let mut ws = VirtualWorkspace::new_with_init_std_lib();
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
                 ---@class UnitKey: integer
 
@@ -1114,6 +1132,427 @@ mod test {
 
                 get(key)
             "#
+        ));
+    }
+
+    #[test]
+    fn test_self() {
+        let mut ws = VirtualWorkspace::new();
+        assert!(ws.check_code_for(
+            DiagnosticCode::ParamTypeMismatch,
+            r#"
+                ---@class test
+                local A
+
+                function A:stop()
+                end
+
+                local stop = A.stop
+                stop(A)
+            "#
+        ));
+    }
+
+    #[test]
+    fn test_generic_type() {
+        let mut ws = VirtualWorkspace::new();
+        ws.def(
+            r#"
+                ---@class ObserverParams<T>
+                ---@field next fun(value: T)
+                ---@field errorResume? fun(error: any)
+
+
+                ---@class Observer<T>
+                local Observer = {}
+
+                ---@param observer ObserverParams<T>
+                function Observer:subscribe(observer)
+                end
+        "#,
+        );
+        assert!(ws.check_code_for(
+            DiagnosticCode::ParamTypeMismatch,
+            r#"
+            ---@type Observer<number>
+            local observer
+
+            observer:subscribe({
+                next = function(value)
+                    print(value)
+                end
+            })
+            "#
+        ));
+    }
+
+    #[test]
+    fn test_issue_573() {
+        let mut ws = VirtualWorkspace::new();
+        ws.def(
+            r#"
+                --- @class A
+                --- @field [integer] string
+                --- @field data any
+
+                --- @param a string[]
+                function takesArray(a) end
+            "#,
+        );
+        assert!(ws.check_code_for(
+            DiagnosticCode::ParamTypeMismatch,
+            r#"
+                takesArray({} --[[@as A]])
+            "#
+        ));
+    }
+
+    #[test]
+    fn test_issue_574() {
+        let mut ws = VirtualWorkspace::new();
+        ws.def(
+            r#"
+                --- @param x { y: integer } & { z: string }
+                function foo(x) end
+            "#,
+        );
+        assert!(!ws.check_code_for(
+            DiagnosticCode::ParamTypeMismatch,
+            r#"
+               foo({y = "", z = ""})
+            "#
+        ));
+
+        assert!(ws.check_code_for(
+            DiagnosticCode::ParamTypeMismatch,
+            r#"
+               foo({y = 1, z = ""})
+            "#
+        ));
+    }
+
+    #[test]
+    fn test_meta_pairs() {
+        let mut ws = VirtualWorkspace::new_with_init_std_lib();
+        ws.def(
+            r#"
+                ---@class RingBufferSpan<T>
+                local RingBufferSpan
+
+                ---@return fun(): integer, T
+                function RingBufferSpan:__pairs()
+                end
+            "#,
+        );
+        assert!(ws.check_code_for(
+            DiagnosticCode::ParamTypeMismatch,
+            r#"
+            local pairs = pairs
+
+            ---@type RingBufferSpan
+            local span
+
+            for k, v in pairs(span) do
+            end
+            "#
+        ));
+
+        // 测试泛型
+        assert!(ws.check_code_for(
+            DiagnosticCode::ParamTypeMismatch,
+            r#"
+            ---@type RingBufferSpan<number>
+            local span
+
+            for k, v in pairs(span) do
+                A = v
+            end
+            "#
+        ));
+        let a_ty = ws.expr_ty("A");
+        let expected = ws.ty("number");
+        assert_eq!(a_ty, expected);
+    }
+
+    #[test]
+    fn test_generic_union_type() {
+        let mut ws = VirtualWorkspace::new();
+        ws.def(
+            r#"
+                ---@class Params<T>
+                ---@field next fun(value: T)
+                ---@field error? fun(error: any)
+
+                ---@generic T
+                ---@param params fun(value: T) | Params<T>
+                function test(params)
+                end
+
+            "#,
+        );
+        assert!(!ws.check_code_for(
+            DiagnosticCode::ParamTypeMismatch,
+            r#"
+                test({})
+            "#
+        ));
+    }
+
+    #[test]
+    fn test_alias_branch_label_flow() {
+        let mut ws = VirtualWorkspace::new();
+        ws.def_file(
+            "test.lua",
+            r#"
+            ---@alias EditorAttrTypeAlias
+            ---| 'ATTR_BASE'
+            ---| 'ATTR_BASE_RATIO'
+            ---| 'ATTR_ALL_RATIO'
+
+            ---@param attr_element string
+            function test(attr_element) end
+        "#,
+        );
+
+        assert!(ws.check_code_for_namespace(
+            DiagnosticCode::ParamTypeMismatch,
+            r#"
+            ---@param attr_type EditorAttrTypeAlias
+            function add_attr(attr_type)
+                if attr_type ~= 'ATTR_BASE' then
+                end
+                test(attr_type)
+            end
+        "#
+        ));
+    }
+
+    #[test]
+    fn test_self_contain_tpl() {
+        let mut ws = VirtualWorkspace::new();
+        ws.def_file(
+            "test.lua",
+            r#"
+                ---@class Observable<T>
+                Observable = {}
+
+                ---@param ... Observable<any>
+                function zip(...)
+                end
+
+        "#,
+        );
+
+        assert!(ws.check_code_for_namespace(
+            DiagnosticCode::ParamTypeMismatch,
+            r#"
+            function Observable:test()
+                zip(self)
+            end
+        "#
+        ));
+    }
+
+    #[test]
+    fn test_issue_841() {
+        let mut ws = VirtualWorkspace::new();
+        assert!(ws.check_code_for(
+            DiagnosticCode::ParamTypeMismatch,
+            r#"
+        --- @class B
+        --- @field cmd string
+
+        --- @class A: B
+        --- @field cmd? string
+
+        --- @param x A
+        local function foo(x)
+        end
+
+        foo({})
+        "#,
+        ));
+    }
+
+    #[test]
+    fn test_fix_issue_844() {
+        let mut ws = VirtualWorkspace::new();
+        ws.def(
+            r#"
+        ---@alias Tester fun(customTesters: Tester[]): boolean?
+
+        ---@generic V
+        ---@param t V[]
+        ---@return fun(tbl: any):int, V
+        function ipairs(t) end
+        "#,
+        );
+        assert!(ws.check_code_for(
+            DiagnosticCode::ParamTypeMismatch,
+            r#"
+            ---@param newTesters Tester[]
+            local function addMatchers(newTesters)
+                for _, tester in ipairs(newTesters) do
+                end
+            end
+        "#
+        ));
+    }
+
+    #[test]
+    fn test_pairs_1() {
+        let mut ws = VirtualWorkspace::new();
+        ws.def(
+            r#"
+        ---@param value string
+        function aaaa(value)
+        end
+
+        ---@generic K, V
+        ---@param t {[K]: V} | V[]
+        ---@return fun(tbl: any):K, V
+        function pairs(t) end
+        "#,
+        );
+        assert!(!ws.check_code_for(
+            DiagnosticCode::ParamTypeMismatch,
+            r#"
+            ---@type {[string]: number}
+            local matchers = {}
+            for _, matcher in pairs(matchers) do
+                aaaa(matcher)
+            end
+        "#
+        ));
+        assert!(!ws.check_code_for(
+            DiagnosticCode::ParamTypeMismatch,
+            r#"
+            ---@alias MatchersObject {[string]: number}
+            ---@type MatchersObject
+            local matchers = {}
+            for _, matcher in pairs(matchers) do
+                aaaa(matcher)
+            end
+        "#
+        ));
+    }
+
+    #[test]
+    fn test_keyof() {
+        let mut ws = VirtualWorkspace::new();
+        ws.def(
+            r#"
+            ---@class SuiteHooks
+            ---@field beforeAll string
+            ---@field afterAll string
+
+            ---@param name keyof SuiteHooks
+            function test(name)
+            end
+        "#,
+        );
+        assert!(!ws.check_code_for(
+            DiagnosticCode::ParamTypeMismatch,
+            r#"
+            test("a")
+        "#,
+        ));
+        assert!(ws.check_code_for(
+            DiagnosticCode::ParamTypeMismatch,
+            r#"
+            test("beforeAll")
+        "#,
+        ));
+        assert!(ws.check_code_for(
+            DiagnosticCode::ParamTypeMismatch,
+            r#"
+            ---@type keyof SuiteHooks
+            local name
+            test(name)
+        "#,
+        ));
+    }
+
+    #[test]
+    fn test_origin_self() {
+        let mut ws = VirtualWorkspace::new();
+        ws.def(
+            r#"
+            ---@class Runner
+            ---@field onCollectStart? fun(self:self)
+
+            ---@type Runner
+            runner = {}
+
+        "#,
+        );
+        assert!(ws.check_code_for(
+            DiagnosticCode::ParamTypeMismatch,
+            r#"
+            local originOnCollectStart = runner.onCollectStart
+            runner.onCollectStart = function(self)
+                originOnCollectStart(self)
+            end
+        "#,
+        ));
+    }
+
+    #[test]
+    fn test_issue_896() {
+        let mut ws = VirtualWorkspace::new();
+        let mut emmyrc = ws.get_emmyrc();
+        emmyrc.strict.array_index = false;
+        ws.update_emmyrc(emmyrc);
+
+        assert!(ws.check_code_for(
+            DiagnosticCode::ParamTypeMismatch,
+            r#"
+            ---@alias MyFnA fun(): number
+            ---@alias MyFnB<T> fun(): T
+            ---@alias MyFnC<T> fun(): number
+
+            local aaa ---@type MyFnA[]
+            ---@param aaa MyFnA[]
+            local function AAA(aaa) return aaa end
+            local _ = AAA(aaa)
+
+            local bbb1 ---@type (MyFnB<number>)[]
+            local bbb2 = { function() return 1 end } ---@type (MyFnB<number>)[]
+            ---@param bbb (MyFnB<number>)[]
+            local function BBB(bbb) return bbb end
+            local _ = BBB(bbb1)
+            local _ = BBB(bbb2)
+
+            local ccc1 ---@type (MyFnC<number>)[]
+            local ccc2 = { function() return 1 end } ---@type (MyFnC<number>)[]
+            ---@param ccc (MyFnC<number>)[]
+            local function CCC(ccc) return ccc end
+            local _ = CCC(ccc1)
+            local _ = CCC(ccc2)
+        "#,
+        ));
+    }
+
+    #[test]
+    fn test_call_operator_implicit_self_param_type() {
+        let mut ws = VirtualWorkspace::new();
+
+        assert!(ws.check_code_for(
+            DiagnosticCode::ParamTypeMismatch,
+            r#"
+                ---@class Iter
+
+                ---@class IterMod
+                ---@operator call: Iter
+
+                ---@type string[]
+                local paths = { "a" }
+
+                ---@type IterMod
+                local iter
+
+                local value = iter(paths)
+        "#,
         ));
     }
 }

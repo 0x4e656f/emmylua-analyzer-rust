@@ -1,12 +1,13 @@
 use crate::{
-    check_type_compact,
-    semantic::type_check::{check_general_type_compact, type_check_guard::TypeCheckGuard},
-    DbIndex, LuaMemberKey, LuaMemberOwner, LuaType, LuaTypeCache, TypeCheckFailReason,
-    TypeCheckResult,
+    LuaMemberKey, LuaMemberOwner, LuaType, LuaTypeCache, TypeCheckFailReason, TypeCheckResult,
+    semantic::type_check::{
+        check_general_type_compact, type_check_context::TypeCheckContext,
+        type_check_guard::TypeCheckGuard,
+    },
 };
 
 pub fn check_table_generic_type_compact(
-    db: &DbIndex,
+    context: &mut TypeCheckContext,
     source_generic_param: &Vec<LuaType>,
     compact_type: &LuaType,
     check_guard: TypeCheckGuard,
@@ -20,9 +21,14 @@ pub fn check_table_generic_type_compact(
                 let compact_key = &compact_generic_param[0];
                 let compact_value = &compact_generic_param[1];
 
-                check_general_type_compact(db, source_key, compact_key, check_guard.next_level()?)?;
                 check_general_type_compact(
-                    db,
+                    context,
+                    source_key,
+                    compact_key,
+                    check_guard.next_level()?,
+                )?;
+                check_general_type_compact(
+                    context,
                     source_value,
                     compact_value,
                     check_guard.next_level()?,
@@ -33,18 +39,23 @@ pub fn check_table_generic_type_compact(
         LuaType::TableConst(inst) => {
             let table_member_owner = LuaMemberOwner::Element(inst.clone());
             return check_table_generic_compact_member_owner(
-                db,
+                context,
                 source_generic_param,
                 table_member_owner,
                 check_guard.next_level()?,
             );
         }
-        LuaType::Array(base) => {
+        LuaType::Array(array_type) => {
             if source_generic_param.len() == 2 {
                 let key = &source_generic_param[0];
                 let value = &source_generic_param[1];
                 if key.is_any() || key.is_integer() {
-                    return check_type_compact(db, value, base);
+                    return check_general_type_compact(
+                        context,
+                        value,
+                        array_type.get_base(),
+                        check_guard.next_level()?,
+                    );
                 }
             }
         }
@@ -55,7 +66,7 @@ pub fn check_table_generic_type_compact(
                 if key.is_any() {
                     for tuple_type in tuple.get_types() {
                         check_general_type_compact(
-                            db,
+                            context,
                             value,
                             tuple_type,
                             check_guard.next_level()?,
@@ -68,15 +79,27 @@ pub fn check_table_generic_type_compact(
                 return Ok(());
             }
         }
+        LuaType::Userdata => return Ok(()),
         // maybe support object
         // need check later
-        LuaType::Ref(_) | LuaType::Def(_) | LuaType::Userdata => return Ok(()),
+        LuaType::Ref(id) | LuaType::Def(id) => {
+            let owner = LuaMemberOwner::Type(id.clone());
+            return check_table_generic_compact_member_owner(
+                context,
+                source_generic_param,
+                owner,
+                check_guard.next_level()?,
+            );
+        }
+        LuaType::Generic(_) => {
+            return Ok(());
+        }
         LuaType::Union(union) => {
-            for union_type in union.get_types() {
+            for union_type in union.into_vec() {
                 check_table_generic_type_compact(
-                    db,
+                    context,
                     source_generic_param,
-                    union_type,
+                    &union_type,
                     check_guard,
                 )?;
             }
@@ -90,8 +113,8 @@ pub fn check_table_generic_type_compact(
 }
 
 fn check_table_generic_compact_member_owner(
-    db: &DbIndex,
-    source_generic_params: &Vec<LuaType>,
+    context: &mut TypeCheckContext,
+    source_generic_params: &[LuaType],
     member_owner: LuaMemberOwner,
     check_guard: TypeCheckGuard,
 ) -> TypeCheckResult {
@@ -99,7 +122,7 @@ fn check_table_generic_compact_member_owner(
         return Err(TypeCheckFailReason::TypeNotMatch);
     }
 
-    let member_index = db.get_member_index();
+    let member_index = context.db.get_member_index();
     let members = match member_index.get_members(&member_owner) {
         Some(members) => members,
         None => return Ok(()),
@@ -116,13 +139,19 @@ fn check_table_generic_compact_member_owner(
             _ => LuaType::Any,
         };
 
-        let member_type = db
+        let member_type = context
+            .db
             .get_type_index()
             .get_type_cache(&member.get_id().into())
             .unwrap_or(&LuaTypeCache::InferType(LuaType::Unknown))
             .as_type();
-        check_general_type_compact(db, source_key, &key_type, check_guard.next_level()?)?;
-        check_general_type_compact(db, source_value, &member_type, check_guard.next_level()?)?;
+        check_general_type_compact(context, source_key, &key_type, check_guard.next_level()?)?;
+        check_general_type_compact(
+            context,
+            source_value,
+            member_type,
+            check_guard.next_level()?,
+        )?;
     }
 
     Ok(())

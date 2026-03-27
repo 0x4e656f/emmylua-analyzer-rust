@@ -1,4 +1,7 @@
-use emmylua_code_analysis::{DbIndex, LuaMemberInfo, LuaMemberKey, LuaSemanticDeclId, LuaType};
+use emmylua_code_analysis::{
+    DbIndex, LuaAliasCallKind, LuaMemberInfo, LuaMemberKey, LuaSemanticDeclId, LuaType,
+    SemanticModel, get_keyof_members, try_extract_signature_id_from_field,
+};
 use emmylua_parser::{
     LuaAssignStat, LuaAstNode, LuaAstToken, LuaFuncStat, LuaGeneralToken, LuaIndexExpr,
     LuaParenExpr, LuaTokenKind,
@@ -6,12 +9,12 @@ use emmylua_parser::{
 use lsp_types::CompletionItem;
 
 use crate::handlers::completion::{
-    completion_builder::CompletionBuilder, completion_data::CompletionData,
-    providers::get_function_remove_nil,
+    add_completions::get_function_snippet, completion_builder::CompletionBuilder,
+    completion_data::CompletionData, providers::get_function_remove_nil,
 };
 
 use super::{
-    check_visibility, get_completion_kind, get_description, get_detail, is_deprecated, CallDisplay,
+    CallDisplay, check_visibility, get_completion_kind, get_description, get_detail, is_deprecated,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -26,7 +29,7 @@ pub fn add_member_completion(
     builder: &mut CompletionBuilder,
     member_info: LuaMemberInfo,
     status: CompletionTriggerStatus,
-    function_overload_count: Option<usize>,
+    overload_count: Option<usize>,
 ) -> Option<()> {
     if builder.is_cancelled() {
         return None;
@@ -37,30 +40,57 @@ pub fn add_member_completion(
     }
 
     let member_key = &member_info.key;
+    let mut can_add_snippet = true;
     let label = match status {
         CompletionTriggerStatus::Dot => match member_key {
             LuaMemberKey::Name(name) => name.to_string(),
             LuaMemberKey::Integer(index) => format!("[{}]", index),
+            LuaMemberKey::ExprType(typ) => {
+                if let LuaType::Call(alias_call) = typ {
+                    if alias_call.get_call_kind() == LuaAliasCallKind::KeyOf
+                        && alias_call.get_operands().len() == 1
+                    {
+                        let members = get_keyof_members(
+                            builder.semantic_model.get_db(),
+                            &alias_call.get_operands()[0],
+                        )
+                        .unwrap_or_default();
+                        let member_keys = members.iter().map(|m| m.key.clone()).collect::<Vec<_>>();
+                        for key in member_keys {
+                            let mut member_info = member_info.clone();
+                            member_info.key = key;
+                            add_member_completion(builder, member_info, status, None);
+                        }
+                    }
+                }
+                return None;
+            }
             _ => return None,
         },
         CompletionTriggerStatus::Colon => match member_key {
             LuaMemberKey::Name(name) => name.to_string(),
             _ => return None,
         },
-        CompletionTriggerStatus::InString => match member_key {
-            LuaMemberKey::Name(name) => name.to_string(),
-            _ => return None,
-        },
-        CompletionTriggerStatus::LeftBracket => match member_key {
-            LuaMemberKey::Name(name) => format!("\"{}\"", name.to_string()),
-            LuaMemberKey::Integer(index) => format!("{}", index),
-            _ => return None,
-        },
+        CompletionTriggerStatus::InString => {
+            can_add_snippet = false;
+            match member_key {
+                LuaMemberKey::Name(name) => name.to_string(),
+                _ => return None,
+            }
+        }
+        CompletionTriggerStatus::LeftBracket => {
+            can_add_snippet = false;
+            match member_key {
+                LuaMemberKey::Name(name) => format!("\"{}\"", name),
+                LuaMemberKey::Integer(index) => format!("{}", index),
+                _ => return None,
+            }
+        }
     };
 
-    let typ = member_info.typ;
+    let typ = &member_info.typ;
     let remove_nil_type =
-        get_function_remove_nil(&builder.semantic_model.get_db(), &typ).unwrap_or(typ);
+        get_function_remove_nil(builder.semantic_model.get_db(), typ).unwrap_or(typ.clone());
     if status == CompletionTriggerStatus::Colon && !remove_nil_type.is_function() {
         return None;
     }
@@ -68,18 +98,9 @@ pub fn add_member_completion(
     // 附加数据, 用于在`resolve`时进一步处理
     let completion_data = if let Some(id) = &property_owner {
         if let Some(index) = member_info.overload_index {
-            CompletionData::from_overload(
-                builder,
-                id.clone().into(),
-                index,
-                function_overload_count,
-            )
+            CompletionData::from_overload(builder, id.clone(), index, overload_count)
         } else {
-            CompletionData::from_property_owner_id(
-                builder,
-                id.clone().into(),
-                function_overload_count,
-            )
+            CompletionData::from_property_owner_id(builder, id.clone(), overload_count)
         }
     } else {
         None
@@ -92,11 +113,9 @@ pub fn add_member_completion(
     // 在`detail`更右侧, 且不紧靠着`detail`显示
     let description = get_description(builder, &remove_nil_type);
 
-    let deprecated = if let Some(id) = &property_owner {
-        Some(is_deprecated(builder, id.clone()))
-    } else {
-        None
-    };
+    let deprecated = property_owner
+        .as_ref()
+        .map(|id| is_deprecated(builder, id.clone()));
 
     let mut completion_item = CompletionItem {
         label: label.clone(),
@@ -137,7 +156,19 @@ pub fn add_member_completion(
         );
     }
 
-    builder.add_completion_item(completion_item)?;
+    if can_add_snippet && builder.support_snippets(typ) {
+        if let Some(snippet) = get_function_snippet(builder, &label, typ, call_display) {
+            completion_item.insert_text = Some(snippet);
+            completion_item.insert_text_format = Some(lsp_types::InsertTextFormat::SNIPPET);
+        }
+    }
+
+    // 尝试添加别名补全项, 如果添加成功, 则不添加原来的 `[index]` 补全项
+    if !try_add_alias_completion_item_new(builder, &member_info, &completion_item, &label)
+        .unwrap_or(false)
+    {
+        builder.add_completion_item(completion_item)?;
+    }
 
     // add overloads if the type is function
     add_signature_overloads(
@@ -147,7 +178,7 @@ pub fn add_member_completion(
         call_display,
         deprecated,
         label,
-        function_overload_count,
+        overload_count,
     );
 
     Some(())
@@ -171,7 +202,7 @@ fn add_signature_overloads(
         .semantic_model
         .get_db()
         .get_signature_index()
-        .get(&signature_id)?
+        .get(signature_id)?
         .overloads
         .clone();
 
@@ -183,7 +214,7 @@ fn add_signature_overloads(
             let description = get_description(builder, &typ);
             let detail = get_detail(builder, &typ, call_display);
             let data = if let Some(id) = &property_owner {
-                CompletionData::from_overload(builder, id.clone().into(), index, overload_count)
+                CompletionData::from_overload(builder, id.clone(), index, overload_count)
             } else {
                 None
             };
@@ -250,7 +281,7 @@ fn resolve_function_params(
     if completion_item.insert_text.is_some() || completion_item.text_edit.is_some() {
         return None;
     }
-    let new_text = get_resolve_function_params_str(&typ, call_display)?;
+    let new_text = get_resolve_function_params_str(typ, call_display)?;
     let index_expr = LuaIndexExpr::cast(builder.trigger_token.parent()?)?;
     let func_stat = index_expr.get_parent::<LuaFuncStat>()?;
     // 从 ast 解析
@@ -261,11 +292,11 @@ fn resolve_function_params(
     let assign_stat = LuaAssignStat::cast(next_sibling)?;
     let paren_expr = assign_stat.child::<LuaParenExpr>()?;
     // 如果 ast 中包含了参数, 则不补全
-    if let Some(_) = paren_expr.get_expr() {
+    if paren_expr.get_expr().is_some() {
         return None;
     }
     let left_paren = paren_expr.token::<LuaGeneralToken>()?;
-    if left_paren.get_token_kind() != LuaTokenKind::TkLeftParen.into() {
+    if left_paren.get_token_kind() != LuaTokenKind::TkLeftParen {
         return None;
     }
     // 可能不稳定! 因为 completion_item.label 先被应用, 然后再应用本项, 此时 range 发生了改变
@@ -281,7 +312,7 @@ fn resolve_function_params(
 
     completion_item.additional_text_edits = Some(vec![lsp_types::TextEdit {
         range: lsp_add_range,
-        new_text: new_text,
+        new_text,
     }]);
 
     Some(())
@@ -307,8 +338,70 @@ fn get_resolve_function_params_str(typ: &LuaType, display: CallDisplay) -> Optio
                 }
                 _ => {}
             }
-            Some(format!("{}", params_str.join(", ")))
+            Some(params_str.join(", ").to_string())
         }
         _ => None,
     }
+}
+
+fn try_add_alias_completion_item_new(
+    builder: &mut CompletionBuilder,
+    member_info: &LuaMemberInfo,
+    completion_item: &CompletionItem,
+    label: &String,
+) -> Option<bool> {
+    let alias_label = get_index_alias_name(&builder.semantic_model, member_info)?;
+    let mut alias_completion_item = completion_item.clone();
+    alias_completion_item.label = alias_label;
+    alias_completion_item.insert_text = Some(label.clone());
+
+    // 更新 label_details 添加别名提示
+    let index_hint = t!("completion.index %{label}", label = label).to_string();
+    let label_details = alias_completion_item
+        .label_details
+        .get_or_insert_with(Default::default);
+    label_details.description = match label_details.description.take() {
+        Some(desc) => Some(format!("({}) {} ", index_hint, desc)),
+        None => Some(index_hint),
+    };
+    builder.add_completion_item(alias_completion_item)?;
+    Some(true)
+}
+
+pub fn get_index_alias_name(
+    semantic_model: &SemanticModel,
+    member_info: &LuaMemberInfo,
+) -> Option<String> {
+    let db = semantic_model.get_db();
+    let LuaMemberKey::Integer(_) = member_info.key else {
+        return None;
+    };
+
+    let property_owner_id = member_info.property_owner_id.as_ref()?;
+    let LuaSemanticDeclId::Member(member_id) = property_owner_id else {
+        return None;
+    };
+    let common_property = match db.get_property_index().get_property(property_owner_id) {
+        Some(common_property) => common_property,
+        None => {
+            // field定义的`signature`的`common_property`绑定位置稍有不同, 需要特殊处理
+            let member = db.get_member_index().get_member(member_id)?;
+            let signature_id =
+                try_extract_signature_id_from_field(semantic_model.get_db(), member)?;
+            db.get_property_index()
+                .get_property(&LuaSemanticDeclId::Signature(signature_id))?
+        }
+    };
+
+    let alias_label = common_property
+        .find_attribute_use("index_alias")?
+        .args
+        .first()
+        .and_then(|(_, typ)| typ.as_ref())
+        .and_then(|param| match param {
+            LuaType::DocStringConst(s) => Some(s.as_ref()),
+            _ => None,
+        })?
+        .to_string();
+    Some(alias_label)
 }

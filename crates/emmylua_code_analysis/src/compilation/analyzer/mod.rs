@@ -1,18 +1,21 @@
-mod bind_type;
+mod common;
 mod decl;
 mod doc;
 mod flow;
-mod infer_manager;
+mod infer_cache_manager;
 mod lua;
 mod unresolve;
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use crate::{
-    db_index::DbIndex, profile::Profile, Emmyrc, InFiled, InferFailReason, LuaType, WorkspaceId,
+    Emmyrc, FileId, InFiled, InferFailReason, WorkspaceId, db_index::DbIndex, profile::Profile,
 };
-use emmylua_parser::{LuaChunk, LuaSyntaxId};
-use infer_manager::InferCacheManager;
+use emmylua_parser::LuaChunk;
+use infer_cache_manager::InferCacheManager;
 use unresolve::UnResolve;
 
 pub fn analyze(db: &mut DbIndex, need_analyzed_files: Vec<InFiled<LuaChunk>>, config: Arc<Emmyrc>) {
@@ -23,14 +26,23 @@ pub fn analyze(db: &mut DbIndex, need_analyzed_files: Vec<InFiled<LuaChunk>>, co
     let contexts = module_analyze(db, need_analyzed_files, config);
 
     for (workspace_id, mut context) in contexts {
+        context.workspace_id = Some(workspace_id);
         let profile_log = format!("analyze workspace {}", workspace_id);
         let _p = Profile::cond_new(&profile_log, context.tree_list.len() > 1);
-        decl::analyze(db, &mut context);
-        doc::analyze(db, &mut context);
-        flow::analyze(db, &mut context);
-        lua::analyze(db, &mut context);
-        unresolve::analyze(db, &mut context);
+        run_analysis::<decl::DeclAnalysisPipeline>(db, &mut context);
+        run_analysis::<doc::DocAnalysisPipeline>(db, &mut context);
+        run_analysis::<flow::FlowAnalysisPipeline>(db, &mut context);
+        run_analysis::<lua::LuaAnalysisPipeline>(db, &mut context);
+        run_analysis::<unresolve::UnResolveAnalysisPipeline>(db, &mut context);
     }
+}
+
+trait AnalysisPipeline {
+    fn analyze(db: &mut DbIndex, context: &mut AnalyzeContext);
+}
+
+fn run_analysis<T: AnalysisPipeline>(db: &mut DbIndex, context: &mut AnalyzeContext) {
+    T::analyze(db, context);
 }
 
 fn module_analyze(
@@ -57,7 +69,11 @@ fn module_analyze(
             let mut context = AnalyzeContext::new(config);
             context.add_tree_chunk(in_filed_tree);
             return vec![(workspace_id, context)];
-        }
+        } else if db.get_vfs().is_remote_file(&file_id) {
+            let mut context = AnalyzeContext::new(config);
+            context.add_tree_chunk(in_filed_tree);
+            return vec![(WorkspaceId::REMOTE, context)];
+        };
 
         return vec![];
     }
@@ -83,15 +99,35 @@ fn module_analyze(
                 .entry(workspace_id)
                 .or_default()
                 .push(in_filed_tree);
+        } else if db.get_vfs().is_remote_file(&file_id) {
+            file_tree_map
+                .entry(WorkspaceId::REMOTE)
+                .or_default()
+                .push(in_filed_tree);
         }
     }
 
     let mut contexts = Vec::new();
+    if let Some(std_lib) = file_tree_map.remove(&WorkspaceId::STD) {
+        let mut context = AnalyzeContext::new(config.clone());
+        context.tree_list = std_lib;
+        contexts.push((WorkspaceId::STD, context));
+    }
+
+    let mut main_vec = Vec::new();
     for (workspace_id, tree_list) in file_tree_map {
         let mut context = AnalyzeContext::new(config.clone());
         context.tree_list = tree_list;
-        contexts.push((workspace_id, context));
+        if workspace_id.is_library() || workspace_id.is_remote() {
+            contexts.push((workspace_id, context));
+        } else {
+            main_vec.push((workspace_id, context));
+        }
     }
+
+    contexts.sort_by(|a, b| a.0.cmp(&b.0));
+
+    contexts.extend(main_vec);
     contexts
 }
 
@@ -100,9 +136,10 @@ pub struct AnalyzeContext {
     tree_list: Vec<InFiled<LuaChunk>>,
     #[allow(unused)]
     config: Arc<Emmyrc>,
-    cast_flow: HashMap<InFiled<LuaSyntaxId>, LuaType>,
+    metas: HashSet<FileId>,
     unresolves: Vec<(UnResolve, InferFailReason)>,
     infer_manager: InferCacheManager,
+    pub workspace_id: Option<WorkspaceId>,
 }
 
 impl AnalyzeContext {
@@ -110,10 +147,15 @@ impl AnalyzeContext {
         Self {
             tree_list: Vec::new(),
             config: emmyrc,
-            cast_flow: HashMap::new(),
+            metas: HashSet::new(),
             unresolves: Vec::new(),
             infer_manager: InferCacheManager::new(),
+            workspace_id: None,
         }
+    }
+
+    pub fn add_meta(&mut self, file_id: FileId) {
+        self.metas.insert(file_id);
     }
 
     pub fn add_tree_chunk(&mut self, tree: InFiled<LuaChunk>) {

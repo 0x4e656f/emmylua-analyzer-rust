@@ -2,7 +2,514 @@
 
 *All notable changes to the EmmyLua Analyzer Rust project will be documented in this file.*
 
+## [0.21.0] - 2026-3-6
+
+### ✨ Added
+
+- **Support @schema url annotation**: Added support for `@schema` annotation,
+which can be use to add completion and hover for json-schema-defined APIs. For example:
+```lua
+---@schema https://raw.githubusercontent.com/EmmyLuaLs/emmylua-analyzer-rust/refs/heads/main/crates/emmylua_code_analysis/resources/schema.json
+local c = {
+  -- will suggest `diagnostics` and more
+}
+
+```
+
+### 🔧 Changed
+
+- **Update luars to 0.14.2**: Updated the `luars` dependency to version 0.14.2, which includes various bug fixes and improvements to Lua parsing and execution.
+
+### 🐛 Fixed
+
+- fix package.searchpath returns nil+error if none succeeds
+- fix module recursive
+- fix shebang support
+- fix global declaration support
+- fix select(n, func()) correctly narrows type when func returns multiple values
+- fix resolve alias-call returns and simplify flow assignments
+- fix the next returned by pairs should accept 2 arguments
+- fix enforce segment-boundary fuzzy require matching
+- fix stabilize fuzzy require resolution across duplicate suffix matches
+- fix package.searchpath returns nil+error if none succeeds
+- fix lua5.5 named vararg support: donot report syntax-error
+
+## [0.20.0] - 2026-1-30
+### ✨ Added
+- **Support .emmyrc.lua configuration file**: The language server and emmylua_check now support loading configuration from `.emmyrc.lua` in addition to `.emmyrc.json` and `.luarc.json`. Lua configuration is parsed using the [luars](https://github.com/CppCXY/lua-rs) library. A basic config looks like:
+```lua
+local diagnostics = {
+  disable = { "undefined-global" },
+}
+
+return {
+  diagnostics = diagnostics,
+}
+```
+You can use standard libraries such as os, table, utf8, string to write more complex configuration logic. `print` can be used for debugging; its output is redirected to the language server log.
+
+Note: The current `.emmyrc.lua` does not have dedicated code completions; this will be added in a future release.
+Note2: The `luars` project was developed by me with AI assistance. It is an almost-complete Lua 5.5 implementation but is still experimental and contains many bugs. Use with caution.
+
+### 🔧 Changed
+- **Enhance workspace.library**: `workspace.library` now supports per-entry ignore configuration, for example:
+```json
+{
+  "workspace": {
+  "library": [
+    {
+    "path": "/path/to/lib1",
+    "ignoreGlobs": [ "**/test/**" ],
+    "ignoreDir": ["docs"]
+    }
+  ]
+  }
+}
+```
+Additionally, `workspace.library` can now point directly to a single file instead of a directory:
+```json
+{
+  "workspace": {
+  "library": [
+    "/path/to/single/file.lua"
+  ]
+  }
+}
+```
+
+- **Improve type narrowing for 'and'/'or'**: Improved type narrowing for the `and` and `or` operators when used with nullable types and table/literal expressions.
+
+### 🐛 Fixed
+- Fixed preferred_local_alias diagnostic
+- Fixed some type checking issues
+- Fixed recursive behavior in reference computation
+- Optimized generic-related computations
+
+
+## [0.19.0] - 2025-12-25
+
+### ✨ Added
+- **Support Lua5.5**: Added support for Lua 5.5 syntax and features, including global declarations, table.create, and named vararg. For example:
+```lua
+global *
+global <const> a, b, c
+global d, e, f = 1, 2, 3
+table.create(10, 0)
+function func(...args)
+end
+```
+
+- **Support format Lua 5.5 syntax**: The built-in formatter now supports formatting Lua 5.5 syntax.
+- **Add new stdlib i18n translation**: Added new internationalization functions to the standard library.
+- **Support call argument snippet completion**: When `"completion.callSnippet": true` is enabled, provide snippet completions for function arguments during function calls.
+- **Support param/@return completion**: Typing `---@` above a function will show `param/@return` completion suggestions; accepting a suggestion will automatically fill parameter names and types.
+
+### 🔧 Changed
+
+- **Workspace variable search optimization**: Optimized workspace-wide variable search to decide whether to use case-sensitive or case-insensitive matching based on the input's casing.
+
+### 🐛 Fixed
+
+- **Fix integer literal parsing issue**: Integers exceeding int64 are now recognized as floats instead of being treated as 0.
+- **Fix typecheck**: Fixed several type checking issues.
+
+## [0.18.0] - 2025-12-5
+
+An experimental Lua 5.4 interpreter implemented in Rust: https://github.com/CppCXY/lua-rs
+
+### ✨ Added
+
+- **Type narrowing with union types using field checks**: Changed the behavior when using a field of a union type in an `if` statement for type narrowing. Now, if the field exists in some types of the union but not in others, the types without that field will be excluded from the narrowed type. For example:
+```lua
+local a --- @type string|{foo:boolean, bar:string}
+
+if a.foo then
+  local _ = a.bar -- a will be narrowed to {foo:boolean, bar:string}
+end
+```
+- **Support generic in @field**: You can now use declaration generic type in `@field` annotations. For example:
+```lua
+---@class GetType
+---@field get_type fun<T>(name:`T`): T
+local MyClass = {}
+
+local d = MyClass.get_type("Car") -- d: "Car"
+```
+
+### 🔧 Changed
+
+- **Refactor Document Symbols**: Refactored the `textDocument/documentSymbol` request to improve performance and accuracy. The new implementation provides better handling of nested symbols and improves the overall structure of the returned symbol tree.
+
+
+### 🐛 Fixed
+- **Fix Lazyvim.dev integration issue**: Fixed an issue where Lazyvim.dev integration did not work correctly due to ignore `workspace/didConfiguration` changes.
+- **Fix Completion**: Fixed an issue where certain completions were not being suggested, like:
+`Partial<Type>`
+- **Fix nil propagation in consecutive field access**: Fixed an issue where, during consecutive field access, if a previous field could be nil, subsequent fields would incorrectly propagate the nil type. For example:
+```lua
+local a --- @type { foo? : { bar: { baz: number } } }
+
+local b = a.foo.bar -- a.foo may be nil (correct)
+
+local _ = b.baz -- b is number
+```
+
+
+
 ---
+## [0.17.0] - 2025-11-7
+### 🔧 Changed
+- **Refactor IndexAliasName**: Removed the original index alias implementation (`-- [IndexAliasName]`), now use `---@[index_alias("name")]`.
+- **Refactor ClassDefaultCall**: Removed the configuration item `runtime.class_default_call`, now use `---@[constructor("<constructor_method_name>")]`.
+- **Rename ParamTypeNotMatch to ParamTypeMismatch**: Renamed the diagnostic `ParamTypeNotMatch` to `ParamTypeMismatch` for better clarity.
+- **Optimize comment parsing logic**: Comments now preserve leading spaces at the start of each line, maintaining the original formatting as much as possible when returned to the LSP client.
+
+
+### ✨ Added
+- **Attribute**: Introduced the new feature `---@attribute` for defining additional metadata, with several built-in attributes:
+```lua
+--- Deprecated. Accepts an optional message parameter.
+---@attribute deprecated(message: string?)
+
+--- Language Server Optimization Items.
+---
+--- Parameters:
+--- - `check_table_field`: Skips assignment checks for table fields. Recommended for large configuration tables.
+--- - `delayed_definition`: Indicates the variable type is determined by the first assignment.
+---   Only valid for `local` declarations without an initial value.
+---@attribute lsp_optimization(code: "check_table_field"|"delayed_definition")
+
+--- Index field alias, displayed in `hint` and `completion`.
+---
+--- Accepts a string parameter for the alias name.
+---@attribute index_alias(name: string)
+
+--- This attribute must be applied to function parameters, and the parameter type must be a string template generic.
+--- Used to specify the default constructor of a class.
+---
+--- Parameters:
+--- - `name`: The method name as a constructor.
+--- - `root_class`: Marks the root class, will be implicitly inherited, e.g., `System.Object` in C#. Defaults to empty.
+--- - `strip_self`: Whether the `self` parameter can be omitted when calling the constructor, defaults to `true`.
+--- - `return_self`: Whether the constructor is forced to return `self`, defaults to `true`.
+---@attribute constructor(name: string, root_class: string?, strip_self: boolean?, return_self: boolean?)
+
+--- Associates `getter` and `setter` methods with a field. Currently only provides definition navigation functionality.
+--- The target methods must be within the same class.
+---
+--- Parameters:
+--- - `convention`: Naming convention, defaults to `camelCase`. Implicitly adds `get` and `set` prefixes. e.g., `_age` -> `getAge`, `setAge`.
+--- - `getter`: Getter method name. Takes precedence over `convention`.
+--- - `setter`: Setter method name. Takes precedence over `convention`.
+---@attribute field_accessor(convention: "camelCase"|"PascalCase"|"snake_case"|nil, getter: string?, setter: string?)
+```
+
+The syntax is `---@[attribute_name_1(arg...), attribute_name_2(arg...), ...]`, and multiple attributes can be used simultaneously. Example:
+```lua
+---@class A
+---@[deprecated] # If the attribute can omit parameters, `()` can be omitted
+---@field b string # b is now marked as deprecated
+---@[index_alias("b")]
+---@field [1] string # This will be shown as `b` in hints and completion
+```
+- **More Generic Type**: support generic like:
+```lua
+--- Get the parameters of a function as a tuple
+---@alias Parameters<T extends function> T extends (fun(...: infer P): any) and P or never
+
+--- Get the parameters of a constructor as a tuple
+---@alias ConstructorParameters<T> T extends new (fun(...: infer P): any) and P or never
+
+--- Make all properties in T optional
+---@alias Partial<T> { [P in keyof T]?: T[P]; }
+```
+
+- **Support gutter request for intellij**: Added support for gutter requests in IntelliJ, allowing for better integration with the IDE's features.
+
+### 🐛 Fixed
+- **Fix completion**: Fixed an issue where certain completions were not being suggested, like:
+```lua
+if not self:<|>
+```
+- **Fix '~' Replace error in config**: Fixed an issue where using '~' in configuration paths did not correctly expand to the user's home directory.
+- **Fix enum completion issue**: Fixed an issue where enum members were not being suggested in completions.
+- **Fix workspace load status bar**: Fixed an issue where the workspace load status bar always display in empty lua workspace.
+- **Fix some condition narrow**: Fixed some issues with condition-based type narrowing not working as expected.
+
+
+## [0.16.0] - 2025-10-17
+### ✨ Added
+- **Support `workspace/diagnostic`**: Added support for the `workspace/diagnostic` request, allowing clients to fetch diagnostics for the entire workspace.
+- **Support global function overload**: You can now define overloads for global functions in `@meta` files. For example:
+```lua
+---@meta
+
+
+function overload(a: integer): integer
+end
+
+function overload(a: string): string
+end
+```
+
+### 🔧 Changed
+- **Update lsp-server dependency**: Updated the `lsp-server` dependency to version 0.7.9 to leverage the latest features and improvements.
+- **Migrate `lsp-types` to `emmy-lsp-types`**: Migrated from using the `lsp-types` crate to the `emmy-lsp-types` crate, which is a fork tailored for EmmyLua Analyzer Rust. This change allows for better customization and alignment with the project's specific needs.
+
+### 🐛 Fixed
+- **Fix deadlock issue**: Resolved a deadlock issue that could occur during certain operations, improving the stability of the language server.
+- **Fix diagnostic reporting**: Fixed an issue where some diagnostics never cleaned up after files were change information.
+- **Fix overload description issue**: Fixed an issue where descriptions for overloaded functions were not displayed correctly in completion and hover tooltips.
+
+## [0.15.0] - 2025-10-10
+
+### ✨ Added
+- **Use Clippy as linter**: core codebase now uses Clippy as the linter, improving code quality and consistency.
+- **Support `textdocument/diagnostic`**: Added support for the `textDocument/diagnostic` request, allowing clients to fetch diagnostics for a specific document.
+- **Support annotation `@readonly`**: You can now use the `@readonly` annotation to mark fields as read-only. For example:
+```lua
+---@readonly
+local myVar = 42
+```
+- **Add check for `global in non module`**: Added a new diagnostic to check for global variable declarations in non-module scope. This helps detect unintended global variable declarations.
+
+### 🔧 Changed
+- **Optimize semantic token**: Optimized semantic token handling for delimiter symbols.
+
+### 🐛 Fixed
+- **Fix generic pattern matching issue**: Fixed an issue where generic pattern matching aliases could lead to incorrect type inference.
+
+## [0.14.0] - 2025-9-19
+
+### 🔧 Changed
+
+- **Parser Optimization**: The parser now reports syntax errors more accurately and has improved error recovery.
+- **@type Support for Return Statements**: You can now use `@type` above a return statement to specify the return value type, for example:
+```lua
+---@return vim.lsp.Config
+return {}
+```
+- **Type Checking Optimization**: Improved type checking algorithms for better performance.
+
+### ✨ Added
+- **SARIF Format for emmyLua_check**: `emmyLua_check` now supports SARIF format output, enabled via the `--format sarif` command line option.
+- **Generic List Supports T... Syntax**: Generic lists now support the `T...` syntax, for example:
+```lua
+---@alias MyTuple<T...> [T...]
+```
+
+### 🐛 Fixed
+- **Fix create progress**: Fixed an issue with the `window/workDoneProgress/create` protocol; it must be sent as a request, not a notification.
+- **Fix Function Overload Algorithm**: Rewrote the function overload algorithm to better handle variadic function parameters.
+
+
+## [0.13.0] - 2025-9-9
+
+### 🐛 Fixed
+- **LSP Handler Order**: Fixed an issue where LSP request donot handle during initialization.it will be handle after initialization complete.
+
+### ✨ Added
+- **Support @link in comment**: You can now use `@link` in comments to create clickable links. For example:
+```lua
+--- This is a link to {@link string.format}
+```
+- **Support `--editor` directive**: You can now use the `--editor` directive to specify the editor type. For example:
+```shell
+emmylua_ls --editor intellij
+```
+- **Support range foramt for external tool**: You can now use the `rangeFormat` request to format a specific range of code using an external tool. This feature can be enabled with the following configuration:
+```json
+{
+  "format": {
+    "externalToolRangeFormat": {
+        "program": "stylua",
+        "args": [
+            "-",
+            "--stdin-filepath",
+            "${file}",
+            "--indent-width=${indent_size}",
+            "--indent-type",
+            "${use_tabs?Tabs:Spaces}",
+            "--range-start=${start_offset}",
+            "--range-end=${end_offset}"
+        ],
+        "timeout": 5000
+    }
+  }
+}
+```
+for more information, please refer to [External Formatter Options](docs/external_format/external_formatter_options_EN.md).
+- **Add Basic EmmyLua Annotation Documentation**: Added more documentation for EmmyLua annotations, please refer to [EmmyLua Annotation Documentation](docs/emmylua_doc/annotations_EN/README.md).
+
+
+### 🔧 Changed
+- **Refactor LSP Handler**: Refactored LSP handler to improve performance and maintainability.
+- **Refactor Folding Range**: Refactored folding range to support `Intellij`
+- **Add More Semantic Token**: Added more semantic tokens to improve syntax highlighting.
+
+## [0.12.0] - 2025-8-22
+
+### 🐛 Fixed
+- **Crash issue fixed**: Fixed a crash caused by parsing Unicode characters in comments.
+- **Large table performance issue fixed**: Fixed a performance issue where parsing large array tables in projects caused severe slowdowns.
+- **Generic type matching fixed**: Fixed an issue with incorrect matching of `constTpl<T>` types affecting generic type hints.
+
+### ✨ Added
+- **Markdown syntax highlighting enabled by default**: Markdown syntax highlighting in comments is now enabled by default, including partial syntax highlighting for code blocks within comments.
+- **Support for `@language`**: Added support for using `@language` in comments to specify the language of code blocks, for example:
+  ```lua
+  ---@language lua
+  local d = [[
+    print("Hello, world!")
+  ]]
+  ```
+  This enables syntax highlighting for Lua code.
+
+- **Support for `Language<T>` generic type**: You can now use `Language<T: string>` in parameter comments to specify the language of a parameter, for example:
+  ```lua
+  ---@param lang Language<"vim">
+  function vim_run(lang)
+  end
+
+  vim_run [[set ft=lua]]
+  ```
+  Supported injected languages: lua, vim, sql, json, shell, protobuf.
+
+- **Support for `keyof type`**: When a function parameter is `keyof type`, corresponding code completion is provided.
+
+## [0.11.0] - 2025-8-8
+
+### 🐛 Fixed
+- **Fixed a stack overflow crash**: Resolved an issue that caused the language server to crash due to excessive recursion.
+- **Fixed a deadlock issue**: Resolved an issue that caused the language server to hang indefinitely in Neovim.
+- **Fixed workspace libraries**: Resolved an issue where libraries in subdirectories were incorrectly added to the main workspace.
+- **Fixed error reporting**: Resolved an issue where error reports were not being generated correctly for table fields.
+
+### ✨ Added
+- **Support for Markdown/MarkdownRst**: Added support for Markdown and reStructuredText (RST) formats highlighted in documentation comments.
+This feature is disabled by default and can be enabled with the following configuration:
+```json
+{
+  "semanticTokens": {
+    "renderDocumentationMarkup": true
+  },
+  "doc": {
+    "syntax": "md"
+  }
+}
+```
+
+- **Support for external formatting tools**: Added support for external formatting tools. You can now configure an external formatter to format your Lua code. This feature can be enabled with the following configuration:
+```json
+{
+  "format": {
+    "externalTool": {
+      "program": "stylua",
+      "args": [
+        "-",
+        "--stdin-filepath",
+        "${file}",
+        "--indent-width=${indent_size}",
+        "--indent-type",
+        "${use_tabs:Tabs:Spaces}"
+      ]
+    }
+  }
+}
+```
+Note: The built-in formatter is not stylua, but emmyluacodestyle. This feature simply provides an extension point, allowing users to use their preferred formatting tool. In terms of performance, using this extension may be faster than using other plugins.
+
+- **Support for non-standard symbols**: Added support for non-standard symbols in Lua.
+
+```json
+{
+  "runtime": {
+    "nonstandardSymbol": [
+      "//",
+      "/**/",
+      "`",
+      "+=",
+      "-=",
+      "*=",
+      "/=",
+      "%=",
+      "^=",
+      "//=",
+      "|=",
+      "&=",
+      "<<=",
+      ">>=",
+      "||",
+      "&&",
+      "!",
+      "!=",
+      "continue"
+    ]
+  }
+}
+```
+
+
+
+## [0.10.0] - 2025-7-27
+### 🐛 Fixed
+- **Fix create an empty directory**:  Fixed an issue where the language server would create an empty directory.
+### 🔧 Changed
+- **Rust Edition 2024**: The language server is now built with Rust Edition 2024, which brings various performance and stability improvements.
+
+
+## [0.9.1] - 2025-7-25
+### 🔧 Changed
+- **Refactor generic function inference**: Lambda function parameters now use deferred matching, allowing generic types to be inferred from other parameters first. For example:
+```lua
+---@generic T
+---@param f1 fun(...: T...): any
+---@param ... T...
+function invoke(f1, ...)
+
+end
+
+invoke(function(a, b, c) -- infer as: integer, integer, integer
+    print(a, b, c)
+end, 1, 2, 3)
+```
+
+- **Generic Type Decay**: Now, generic types that match constants of integer, string, float, or boolean will be directly converted to their corresponding general types.
+
+### ✨ Added
+- **Use Mimalloc**: Mimalloc is now the default memory allocator, improving performance and memory management. Startup performance is increased by about 50%.
+- **Lua 5.5 Syntax Support**: More complete support for Lua 5.5 syntax, including `global` declarations, `table.create`, and the new attribute syntax. For example:
+```lua
+local <const> a, b, c = 1, 2, 3
+global <const> d, e, f
+```
+Also supports immutability checks for iterator variables in for loop statements.
+
+
+- **Doc Cli Modification**: Improved the documentation CLI to better handle various edge cases and provide more accurate suggestions.
+
+### 🐛 Fixed
+
+- **Fix load order**: Fixed an issue where the order of loading files could lead to incorrect type inference.
+- **Fix Unpack infer**: Fixed an issue where unpacking a table in a table.
+- **Fix rename in @param**: Fixed an issue where renaming a parameter in a function param.
+
+## [0.9.0] - 2025-7-11
+### 🔧 Changed
+
+- **Flow Inference Refactor**: Refactored flow analysis algorithm, now uses a TypeScript-like flow analysis approach for better handling of complex scenarios.
+- **Doc CLI**: Changed export format, now supports multiple `@see` and other tag flags.
+
+### ✨ Added
+
+- **TypeGuard Now Supports Generics**: You can now use generic parameters in TypeGuard, e.g. `TypeGuard<T>`.
+- **Type Narrowing by Constant Fields**: Supports type narrowing using constant fields.
+- **Basic Range Checking**: Array type indexing is now less frequently nullable.
+
+### 🐛 Fixed
+
+- **Bug Fixes**: Fixed various bugs.
+
 ## [0.8.2] - 2025-6-27
 ### ✨ Added
 - **Support for Descriptions Above and After Tags**: You can now add descriptions both above a tag (as a preceding comment) and after a tag (inline). The description will be associated with the corresponding tag.
@@ -145,7 +652,7 @@
 ## [0.8.0] - 2025-5-30
 
 ### ✨ Added
-- **New Standard Types**: 
+- **New Standard Types**:
   - `std.Unpack` type for better `unpack` function inference
   - `std.Rawget` type for better `rawget` function inference
 - **Generator Support**: Implementation similar to `luals`
@@ -263,7 +770,7 @@ Global configuration have less priority than the local one
 - **Flow Analyze Algorithm**: Refactor flow analyze algorithm
 
 ### 🐛 Fixed
-- **Self Inference**: Fix some self infer issue 
+- **Self Inference**: Fix some self infer issue
 - **Diagnostic Action**: Fix some diagnostic action issue
 - **Type Check and Completion**: Optimize some type check and completion
 
@@ -295,7 +802,7 @@ Global configuration have less priority than the local one
 
 ### ✨ Added
 - **Re-index Control**: Disable re-index in default, need to enable by `workspace.enableReindex`
-- **New Diagnostics**: Add New Diagnostics `inject_field`, `missing_fields`, `redefined_local`, `undefined_field`, `inject-field`, `missing-global-doc`, 
+- **New Diagnostics**: Add New Diagnostics `inject_field`, `missing_fields`, `redefined_local`, `undefined_field`, `inject-field`, `missing-global-doc`,
 `incomplete-signature-doc`, `circle-doc-class`, `assign-type-mismatch`, `unbalanced_assignments`, `check_return_count`, `duplicate_require`, `circle_doc_class`, `incomplete_signature_doc`, `unnecessary_assert`
 - **Boolean Type Support**: Support `true` and `false` as type
 - **Compact Fun Return Syntax**: Compact luals fun return syntax like: `(name: string, age: number)`
@@ -363,7 +870,7 @@ Global configuration have less priority than the local one
   ```
 - **Enum Type Check Fix**: Fix enum type check
 - **Custom Operator Infer Fix**: Fix custom operator infer
-- **Select Function Fix and Std.Select Type Addition**: Fix select function and add std.Select type 
+- **Select Function Fix and Std.Select Type Addition**: Fix select function and add std.Select type
 - **Union Type Refactor**: Refactor Union type
 - **Description Support for Type**: Add description to type
 - **Multi Union Description Support**: Support description without '#' on multi union
@@ -407,7 +914,7 @@ Global configuration have less priority than the local one
 
 ---
 
-## [0.4.6] 
+## [0.4.6]
 
 ### 🐛 Fixed
 - **Executable File Directory Hierarchy Issue**: Fix issue with executable file directory hierarchy being too deep.

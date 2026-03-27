@@ -1,11 +1,13 @@
-use flagset::{flags, FlagSet};
+use std::fmt;
+
+use flagset::{FlagSet, flags};
 use internment::ArcIntern;
 use rowan::TextRange;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use smol_str::SmolStr;
 
 use crate::{
-    instantiate_type_generic, DbIndex, FileId, LuaMemberKey, LuaMemberOwner, TypeSubstitutor,
+    DbIndex, FileId, LuaMemberKey, LuaMemberOwner, TypeSubstitutor, instantiate_type_generic,
 };
 
 use super::{LuaType, LuaUnionType};
@@ -15,16 +17,18 @@ pub enum LuaDeclTypeKind {
     Class,
     Enum,
     Alias,
+    Attribute,
 }
 
 flags! {
-    pub enum LuaTypeAttribute: u8 {
+    pub enum LuaTypeFlag: u8 {
         None,
         Key,
         Partial,
         Exact,
         Meta,
         Constructor,
+        Private
     }
 }
 
@@ -42,7 +46,7 @@ impl LuaTypeDecl {
         range: TextRange,
         name: String,
         kind: LuaDeclTypeKind,
-        attrib: FlagSet<LuaTypeAttribute>,
+        flag: FlagSet<LuaTypeFlag>,
         id: LuaTypeDeclId,
     ) -> Self {
         Self {
@@ -50,13 +54,14 @@ impl LuaTypeDecl {
             locations: vec![LuaDeclLocation {
                 file_id,
                 range,
-                attrib,
+                flag,
             }],
             id,
             extra: match kind {
                 LuaDeclTypeKind::Enum => LuaTypeExtra::Enum { base: None },
                 LuaDeclTypeKind::Class => LuaTypeExtra::Class,
                 LuaDeclTypeKind::Alias => LuaTypeExtra::Alias { origin: None },
+                LuaDeclTypeKind::Attribute => LuaTypeExtra::Attribute { typ: None },
             },
         }
     }
@@ -85,22 +90,26 @@ impl LuaTypeDecl {
         matches!(self.extra, LuaTypeExtra::Alias { .. })
     }
 
+    pub fn is_attribute(&self) -> bool {
+        matches!(self.extra, LuaTypeExtra::Attribute { .. })
+    }
+
     pub fn is_exact(&self) -> bool {
         self.locations
             .iter()
-            .any(|l| l.attrib.contains(LuaTypeAttribute::Exact))
+            .any(|l| l.flag.contains(LuaTypeFlag::Exact))
     }
 
     pub fn is_partial(&self) -> bool {
         self.locations
             .iter()
-            .any(|l| l.attrib.contains(LuaTypeAttribute::Partial))
+            .any(|l| l.flag.contains(LuaTypeFlag::Partial))
     }
 
     pub fn is_enum_key(&self) -> bool {
         self.locations
             .iter()
-            .any(|l| l.attrib.contains(LuaTypeAttribute::Key))
+            .any(|l| l.flag.contains(LuaTypeFlag::Key))
     }
 
     pub fn get_id(&self) -> LuaTypeDeclId {
@@ -141,7 +150,7 @@ impl LuaTypeDecl {
                     return Some(origin.clone());
                 }
 
-                Some(instantiate_type_generic(db, &origin, substitutor))
+                Some(instantiate_type_generic(db, origin, substitutor))
             }
             _ => None,
         }
@@ -155,20 +164,28 @@ impl LuaTypeDecl {
     }
 
     pub fn add_alias_origin(&mut self, replace: LuaType) {
-        match &mut self.extra {
-            LuaTypeExtra::Alias { origin, .. } => {
-                *origin = Some(replace);
-            }
-            _ => {}
+        if let LuaTypeExtra::Alias { origin, .. } = &mut self.extra {
+            *origin = Some(replace);
         }
     }
 
     pub fn add_enum_base(&mut self, base_type: LuaType) {
-        match &mut self.extra {
-            LuaTypeExtra::Enum { base } => {
-                *base = Some(base_type);
-            }
-            _ => {}
+        if let LuaTypeExtra::Enum { base } = &mut self.extra {
+            *base = Some(base_type);
+        }
+    }
+
+    pub fn add_attribute_type(&mut self, attribute_type: LuaType) {
+        if let LuaTypeExtra::Attribute { typ } = &mut self.extra {
+            *typ = Some(attribute_type);
+        }
+    }
+
+    pub fn get_attribute_type(&self) -> Option<&LuaType> {
+        if let LuaTypeExtra::Attribute { typ: Some(typ) } = &self.extra {
+            Some(typ)
+        } else {
+            None
         }
     }
 
@@ -191,7 +208,7 @@ impl LuaTypeDecl {
                 let member_key = enum_member.get_key();
                 let fake_type = match member_key {
                     LuaMemberKey::Name(name) => LuaType::DocStringConst(name.clone().into()),
-                    LuaMemberKey::Integer(i) => LuaType::IntegerConst(i.clone()),
+                    LuaMemberKey::Integer(i) => LuaType::IntegerConst(*i),
                     LuaMemberKey::ExprType(typ) => typ.clone(),
                     LuaMemberKey::None => continue,
                 };
@@ -204,8 +221,8 @@ impl LuaTypeDecl {
                     db.get_type_index().get_type_cache(&member.get_id().into())
                 {
                     let member_fake_type = match type_cache.as_type() {
-                        LuaType::StringConst(s) => LuaType::DocStringConst(s.clone().into()),
-                        LuaType::IntegerConst(i) => LuaType::DocIntegerConst(i.clone()),
+                        LuaType::StringConst(s) => LuaType::DocStringConst(s.clone()),
+                        LuaType::IntegerConst(i) => LuaType::DocIntegerConst(*i),
                         _ => type_cache.as_type().clone(),
                     };
 
@@ -214,39 +231,53 @@ impl LuaTypeDecl {
             }
         }
 
-        return Some(LuaType::Union(LuaUnionType::new(union_types).into()));
+        Some(LuaType::Union(LuaUnionType::from_vec(union_types).into()))
     }
 }
 
 #[derive(Debug, Eq, PartialEq, Hash, Clone)]
+pub enum LuaTypeIdentifier {
+    Global(SmolStr),
+    Local(FileId, SmolStr),
+}
+
+#[derive(Debug, Eq, PartialEq, Hash, Clone)]
 pub struct LuaTypeDeclId {
-    id: ArcIntern<SmolStr>,
+    id: ArcIntern<LuaTypeIdentifier>,
 }
 
 impl LuaTypeDeclId {
-    pub fn new_by_id(id: ArcIntern<SmolStr>) -> Self {
-        Self { id }
-    }
-
-    pub fn new(str: &str) -> Self {
+    pub fn global(str: &str) -> Self {
         Self {
-            id: ArcIntern::new(SmolStr::new(str)),
+            id: ArcIntern::new(LuaTypeIdentifier::Global(SmolStr::new(str))),
         }
     }
 
+    pub fn local(file_id: FileId, str: &str) -> Self {
+        Self {
+            id: ArcIntern::new(LuaTypeIdentifier::Local(file_id, SmolStr::new(str))),
+        }
+    }
+
+    pub fn get_id(&self) -> &LuaTypeIdentifier {
+        self.id.as_ref()
+    }
+
     pub fn get_name(&self) -> &str {
-        &self.id
+        match self.id.as_ref() {
+            LuaTypeIdentifier::Global(name) => name.as_ref(),
+            LuaTypeIdentifier::Local(_, name) => name.as_ref(),
+        }
     }
 
     pub fn get_simple_name(&self) -> &str {
         let basic_name = self.get_name();
-        let just_name = if let Some(i) = basic_name.rfind('.') {
+
+        (if let Some(i) = basic_name.rfind('.') {
             &basic_name[i + 1..]
         } else {
-            &basic_name
-        };
-
-        &just_name
+            basic_name
+        }) as _
     }
 
     pub fn collect_super_types(&self, db: &DbIndex, collected_types: &mut Vec<LuaType>) {
@@ -288,7 +319,13 @@ impl Serialize for LuaTypeDeclId {
     where
         S: Serializer,
     {
-        serializer.serialize_str(&self.id)
+        match self.id.as_ref() {
+            LuaTypeIdentifier::Global(name) => serializer.serialize_str(name.as_ref()),
+            LuaTypeIdentifier::Local(file_id, name) => {
+                let s = format!("{}|{}", file_id.id, &name);
+                serializer.serialize_str(&s)
+            }
+        }
     }
 }
 
@@ -297,10 +334,29 @@ impl<'de> Deserialize<'de> for LuaTypeDeclId {
     where
         D: Deserializer<'de>,
     {
-        let s = String::deserialize(deserializer)?;
-        Ok(LuaTypeDeclId {
-            id: ArcIntern::new(SmolStr::new(s)),
-        })
+        struct LuaTypeDeclIdVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for LuaTypeDeclIdVisitor {
+            type Value = LuaTypeDeclId;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a string representing LuaTypeDeclId")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                if let Some((file_id_str, name)) = value.split_once('|') {
+                    let file_id = file_id_str.parse::<u32>().map_err(E::custom)?;
+                    Ok(LuaTypeDeclId::local(FileId { id: file_id }, name))
+                } else {
+                    Ok(LuaTypeDeclId::global(value))
+                }
+            }
+        }
+
+        deserializer.deserialize_str(LuaTypeDeclIdVisitor)
     }
 }
 
@@ -308,7 +364,7 @@ impl<'de> Deserialize<'de> for LuaTypeDeclId {
 pub struct LuaDeclLocation {
     pub file_id: FileId,
     pub range: TextRange,
-    pub attrib: FlagSet<LuaTypeAttribute>,
+    pub flag: FlagSet<LuaTypeFlag>,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -316,4 +372,5 @@ pub enum LuaTypeExtra {
     Enum { base: Option<LuaType> },
     Class,
     Alias { origin: Option<LuaType> },
+    Attribute { typ: Option<LuaType> },
 }

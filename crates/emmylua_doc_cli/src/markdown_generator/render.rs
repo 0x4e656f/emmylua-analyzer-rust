@@ -1,10 +1,10 @@
 use crate::common::render_typ;
 use emmylua_code_analysis::{
-    humanize_type, DbIndex, LuaFunctionType, LuaSignatureId, LuaType, RenderLevel,
+    AsyncState, DbIndex, LuaFunctionType, LuaSignatureId, LuaType, RenderLevel, humanize_type,
 };
 
 pub fn render_const_type(db: &DbIndex, typ: &LuaType) -> String {
-    let const_value = humanize_type(db, typ, RenderLevel::Detailed);
+    let const_value = humanize_type(db, typ, RenderLevel::Documentation);
 
     match typ {
         LuaType::IntegerConst(_) | LuaType::DocIntegerConst(_) => {
@@ -54,7 +54,11 @@ fn render_doc_function_type(
     func_name: &str,
     is_local: bool,
 ) -> String {
-    let async_prev = if lua_func.is_async() { "async " } else { "" };
+    let async_prev = if lua_func.get_async_state() == AsyncState::Async {
+        "async "
+    } else {
+        ""
+    };
     let local_prev = if is_local { "local " } else { "" };
     let params = lua_func
         .get_params()
@@ -62,7 +66,11 @@ fn render_doc_function_type(
         .map(|param| {
             let name = param.0.clone();
             if let Some(ty) = &param.1 {
-                format!("{}: {}", name, render_typ(db, ty))
+                format!(
+                    "{}: {}",
+                    name,
+                    render_typ(db, ty, RenderLevel::Documentation)
+                )
             } else {
                 name.to_string()
             }
@@ -71,7 +79,7 @@ fn render_doc_function_type(
 
     let ret_type = lua_func.get_ret();
 
-    let ret_strs = render_typ(db, ret_type);
+    let ret_strs = render_typ(db, ret_type, RenderLevel::Documentation);
 
     let mut result = String::new();
     result.push_str("```lua\n");
@@ -116,7 +124,11 @@ fn render_signature_type(
     let signature = db.get_signature_index().get(&signature_id)?;
     let mut async_prev = "";
     if let Some(signature) = db.get_signature_index().get(&signature_id) {
-        async_prev = if signature.is_async { "async " } else { "" };
+        async_prev = match signature.async_state {
+            AsyncState::Async => "async ",
+            AsyncState::Sync => "sync ",
+            _ => "",
+        };
     }
 
     let local_prev = if is_local { "local " } else { "" };
@@ -126,7 +138,11 @@ fn render_signature_type(
         .map(|param| {
             let name = param.0.clone();
             if let Some(ty) = &param.1 {
-                format!("{}: {}", name, render_typ(db, ty))
+                format!(
+                    "{}: {}",
+                    name,
+                    render_typ(db, ty, RenderLevel::Documentation)
+                )
             } else {
                 name.to_string()
             }
@@ -160,14 +176,14 @@ fn render_signature_type(
         0 => {}
         1 => {
             result.push_str(" -> ");
-            let type_text = render_typ(db, &rets[0].type_ref);
+            let type_text = render_typ(db, &rets[0].type_ref, RenderLevel::Documentation);
             let name = rets[0].name.clone().unwrap_or("".to_string());
             result.push_str(format!("{} {}", name, type_text).as_str());
         }
         _ => {
             result.push('\n');
             for ret in rets {
-                let type_text = render_typ(db, &ret.type_ref);
+                let type_text = render_typ(db, &ret.type_ref, RenderLevel::Documentation);
                 let name = ret.name.clone().unwrap_or("".to_string());
                 result.push_str(format!(" -> {} {}\n", name, type_text).as_str());
             }

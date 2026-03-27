@@ -6,14 +6,14 @@ mod workspace;
 use emmylua_parser::LuaVersionCondition;
 use log::{error, info};
 pub use module_info::ModuleInfo;
-use module_node::{ModuleNode, ModuleNodeId};
+pub use module_node::{ModuleNode, ModuleNodeId};
 use regex::Regex;
 pub use workspace::{Workspace, WorkspaceId};
 
 use super::traits::LuaIndex;
 use crate::{Emmyrc, FileId};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -29,6 +29,12 @@ pub struct LuaModuleIndex {
     id_counter: u32,
     fuzzy_search: bool,
     module_replace_vec: Vec<(Regex, String)>,
+}
+
+impl Default for LuaModuleIndex {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl LuaModuleIndex {
@@ -54,7 +60,7 @@ impl LuaModuleIndex {
     // patterns like "?.lua" and "?/init.lua"
     pub fn set_module_extract_patterns(&mut self, patterns: Vec<String>) {
         let mut patterns = patterns;
-        patterns.sort_by(|a, b| b.len().cmp(&a.len()));
+        patterns.sort_by_key(|b| std::cmp::Reverse(b.len()));
         patterns.dedup();
         self.module_patterns.clear();
         for item in patterns {
@@ -99,7 +105,7 @@ impl LuaModuleIndex {
             self.remove(file_id);
         }
 
-        let (module_path, workspace_id) = self.extract_module_path(&path)?;
+        let (module_path, workspace_id) = self.extract_module_path(path)?;
         let mut module_path = module_path.replace(['\\', '/'], ".");
         if !self.module_replace_vec.is_empty() {
             module_path = self.replace_module_path(&module_path);
@@ -128,10 +134,7 @@ impl LuaModuleIndex {
         for part in &module_parts {
             // I had to struggle with Rust's ownership rules, making the code look like this.
             let child_id = {
-                let parent_node = match self.module_nodes.get_mut(&parent_node_id) {
-                    Some(node) => node,
-                    None => return None,
-                };
+                let parent_node = self.module_nodes.get_mut(&parent_node_id)?;
                 let node_id = parent_node.children.get(*part);
                 match node_id {
                     Some(id) => *id,
@@ -144,24 +147,22 @@ impl LuaModuleIndex {
                     }
                 }
             };
-            if !self.module_nodes.contains_key(&child_id) {
+            if let std::collections::hash_map::Entry::Vacant(e) = self.module_nodes.entry(child_id)
+            {
                 let new_node = ModuleNode {
                     children: HashMap::new(),
                     file_ids: Vec::new(),
                     parent: Some(parent_node_id),
                 };
 
-                self.module_nodes.insert(child_id, new_node);
+                e.insert(new_node);
                 self.id_counter += 1;
             }
 
             parent_node_id = child_id;
         }
 
-        let node = match self.module_nodes.get_mut(&parent_node_id) {
-            Some(node) => node,
-            None => return None,
-        };
+        let node = self.module_nodes.get_mut(&parent_node_id)?;
 
         node.file_ids.push(file_id);
         let module_name = match module_parts.last() {
@@ -177,7 +178,7 @@ impl LuaModuleIndex {
             export_type: None,
             version_conds: None,
             workspace_id,
-            property_owner_id: None,
+            semantic_id: None,
             is_meta: false,
         };
 
@@ -185,7 +186,7 @@ impl LuaModuleIndex {
         if self.fuzzy_search {
             self.module_name_to_file_ids
                 .entry(module_name)
-                .or_insert(Vec::new())
+                .or_default()
                 .push(file_id);
         }
 
@@ -229,10 +230,7 @@ impl LuaModuleIndex {
         }
 
         if self.fuzzy_search {
-            let last_name = match module_parts.last() {
-                Some(name) => name,
-                None => return None,
-            };
+            let last_name = module_parts.last()?;
 
             return self.fuzzy_find_module(&module_path, last_name);
         }
@@ -256,21 +254,40 @@ impl LuaModuleIndex {
         self.file_module_map.get(file_id)
     }
 
+    /// Find a module by suffix when exact lookup fails.
+    ///
+    /// Candidates must either exactly equal `module_path` or end with `.{module_path}`.
+    /// Among matches, prefer the one with the fewest leading path segments before the suffix,
+    /// then use lexicographic `full_module_name` ordering as a stable tie-break.
     fn fuzzy_find_module(&self, module_path: &str, last_name: &str) -> Option<&ModuleInfo> {
         let file_ids = self.module_name_to_file_ids.get(last_name)?;
-        if file_ids.len() == 1 {
-            return self.file_module_map.get(&file_ids[0]);
-        }
+        let suffix_with_boundary = format!(".{}", module_path);
+        file_ids
+            .iter()
+            .filter_map(|file_id| {
+                let module_info = self.file_module_map.get(file_id)?;
+                let full_module_name = module_info.full_module_name.as_str();
+                let leading_segment_count = if full_module_name == module_path {
+                    Some(0)
+                } else {
+                    full_module_name
+                        .strip_suffix(&suffix_with_boundary)
+                        .map(|prefix| {
+                            prefix
+                                .split('.')
+                                .filter(|segment| !segment.is_empty())
+                                .count()
+                        })
+                }?;
 
-        // find the first matched module
-        for file_id in file_ids {
-            let module_info = self.file_module_map.get(file_id)?;
-            if module_info.full_module_name.ends_with(module_path) {
-                return Some(module_info);
-            }
-        }
-
-        None
+                Some((leading_segment_count, module_info))
+            })
+            .min_by(|(left_count, left_info), (right_count, right_info)| {
+                left_count
+                    .cmp(right_count)
+                    .then_with(|| left_info.full_module_name.cmp(&right_info.full_module_name))
+            })
+            .map(|(_, module_info)| module_info)
     }
 
     /// Find a module node by module path.
@@ -311,17 +328,31 @@ impl LuaModuleIndex {
         for workspace in &self.workspaces {
             if let Ok(relative_path) = path.strip_prefix(&workspace.root) {
                 let relative_path_str = relative_path.to_str().unwrap_or("");
+                if relative_path_str.is_empty() {
+                    if let Some(file_name) = workspace.root.file_prefix() {
+                        let module_path = file_name.to_string_lossy().to_string();
+                        return Some((module_path, workspace.id));
+                    }
+                }
+
                 let module_path = self.match_pattern(relative_path_str);
                 if let Some(module_path) = module_path {
                     if matched_module_path.is_none() {
                         matched_module_path = Some((module_path, workspace.id));
                     } else {
-                        let (matched, _) = match matched_module_path.as_ref() {
+                        let (matched, matched_workspace_id) = match matched_module_path.as_ref() {
                             Some((matched, id)) => (matched, id),
                             None => continue,
                         };
                         if module_path.len() < matched.len() {
-                            matched_module_path = Some((module_path, workspace.id));
+                            // Libraries could be in a subdirectory of the main workspace
+                            // In case of a conflict, we prioritise the non-main workspace ID
+                            let workspace_id = if workspace.id.is_main() {
+                                *matched_workspace_id
+                            } else {
+                                workspace.id
+                            };
+                            matched_module_path = Some((module_path, workspace_id));
                         }
                     }
                 }
@@ -332,19 +363,22 @@ impl LuaModuleIndex {
     }
 
     fn replace_module_path(&self, module_path: &str) -> String {
+        let mut module_path = module_path.to_owned();
         for (key, value) in &self.module_replace_vec {
-            return key.replace_all(&module_path, value).to_string();
+            if let std::borrow::Cow::Owned(o) = key.replace_all(&module_path, value) {
+                module_path = o;
+            }
         }
 
-        module_path.to_string()
+        module_path
     }
 
     pub fn match_pattern(&self, path: &str) -> Option<String> {
         for pattern in &self.module_patterns {
-            if let Some(captures) = pattern.captures(path) {
-                if let Some(matched) = captures.get(1) {
-                    return Some(matched.as_str().to_string());
-                }
+            if let Some(captures) = pattern.captures(path)
+                && let Some(matched) = captures.get(1)
+            {
+                return Some(matched.as_str().to_string());
             }
         }
 
@@ -357,6 +391,19 @@ impl LuaModuleIndex {
         }
     }
 
+    pub fn clear_non_std_workspaces(&mut self) {
+        self.workspaces.retain(|workspace| workspace.id.is_std());
+    }
+
+    pub fn next_library_workspace_id(&self) -> u32 {
+        let used: HashSet<u32> = self.workspaces.iter().map(|w| w.id.id).collect();
+        let mut candidate = 2;
+        while used.contains(&candidate) {
+            candidate += 1;
+        }
+        candidate
+    }
+
     #[allow(unused)]
     pub fn remove_workspace_root(&mut self, root: &Path) {
         self.workspaces.retain(|r| r.root != root);
@@ -366,10 +413,11 @@ impl LuaModuleIndex {
         let mut extension_names = Vec::new();
 
         for extension in &config.runtime.extensions {
-            if extension.starts_with(".") {
-                extension_names.push(extension[1..].to_string());
-            } else if extension.starts_with("*.") {
-                extension_names.push(extension[2..].to_string());
+            if let Some(stripped) = extension
+                .strip_prefix(".")
+                .or_else(|| extension.strip_prefix("*."))
+            {
+                extension_names.push(stripped.to_string());
             } else {
                 extension_names.push(extension.clone());
             }
@@ -471,7 +519,7 @@ impl LuaModuleIndex {
     }
 
     pub fn is_meta_file(&self, file_id: &FileId) -> bool {
-        if let Some(module_info) = self.file_module_map.get(&file_id) {
+        if let Some(module_info) = self.file_module_map.get(file_id) {
             return module_info.is_meta;
         }
 

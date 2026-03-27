@@ -1,8 +1,11 @@
 mod access_invisible;
 mod analyze_error;
 mod assign_type_mismatch;
+mod attribute_check;
 mod await_in_sync;
+mod call_non_callable;
 mod cast_type_mismatch;
+mod check_export;
 mod check_field;
 mod check_param_count;
 mod check_return_count;
@@ -15,18 +18,23 @@ mod duplicate_field;
 mod duplicate_index;
 mod duplicate_require;
 mod duplicate_type;
+mod enum_value_mismatch;
 mod generic;
+mod global_non_module;
 mod incomplete_signature_doc;
 mod local_const_reassign;
 mod missing_fields;
 mod need_check_nil;
 mod param_type_check;
+mod readonly_check;
 mod redefined_local;
+mod require_module_visibility;
 mod return_type_mismatch;
 mod syntax_error;
 mod unbalanced_assignments;
 mod undefined_doc_param;
 mod undefined_global;
+mod unknown_doc_tag;
 mod unnecessary_assert;
 mod unnecessary_if;
 mod unused;
@@ -39,13 +47,13 @@ use rowan::TextRange;
 use std::sync::Arc;
 
 use crate::{
-    db_index::DbIndex, humanize_type, semantic::SemanticModel, FileId, LuaType, RenderLevel,
+    FileId, LuaType, RenderLevel, db_index::DbIndex, humanize_type, semantic::SemanticModel,
 };
 
 use super::{
+    DiagnosticCode,
     lua_diagnostic_code::{get_default_severity, is_code_default_enable},
     lua_diagnostic_config::LuaDiagnosticConfig,
-    DiagnosticCode,
 };
 
 pub trait Checker {
@@ -59,6 +67,9 @@ fn run_check<T: Checker>(context: &mut DiagnosticContext, semantic_model: &Seman
         .iter()
         .any(|code| context.is_checker_enable_by_code(code))
     {
+        // let name = T::CODES.iter().map(|c| c.get_name()).collect::<Vec<_>>().join(",");
+        // let show_name = format!("{}({})", std::any::type_name::<T>(), name);
+        // let _p = Profile::new(&show_name);
         T::check(context, semantic_model);
     }
 }
@@ -75,13 +86,15 @@ pub fn check_file(context: &mut DiagnosticContext, semantic_model: &SemanticMode
     run_check::<local_const_reassign::LocalConstReassignChecker>(context, semantic_model);
     run_check::<discard_returns::DiscardReturnsChecker>(context, semantic_model);
     run_check::<await_in_sync::AwaitInSyncChecker>(context, semantic_model);
+    run_check::<call_non_callable::CallNonCallableChecker>(context, semantic_model);
+    run_check::<missing_fields::MissingFieldsChecker>(context, semantic_model);
     run_check::<param_type_check::ParamTypeCheckChecker>(context, semantic_model);
     run_check::<need_check_nil::NeedCheckNilChecker>(context, semantic_model);
     run_check::<code_style_check::CodeStyleCheckChecker>(context, semantic_model);
     run_check::<return_type_mismatch::ReturnTypeMismatch>(context, semantic_model);
     run_check::<undefined_doc_param::UndefinedDocParamChecker>(context, semantic_model);
     run_check::<redefined_local::RedefinedLocalChecker>(context, semantic_model);
-    run_check::<missing_fields::MissingFieldsChecker>(context, semantic_model);
+    run_check::<check_export::CheckExportChecker>(context, semantic_model);
     run_check::<check_field::CheckFieldChecker>(context, semantic_model);
     run_check::<circle_doc_class::CircleDocClassChecker>(context, semantic_model);
     run_check::<incomplete_signature_doc::IncompleteSignatureDocChecker>(context, semantic_model);
@@ -98,11 +111,22 @@ pub fn check_file(context: &mut DiagnosticContext, semantic_model: &SemanticMode
         semantic_model,
     );
     run_check::<cast_type_mismatch::CastTypeMismatchChecker>(context, semantic_model);
+    run_check::<require_module_visibility::RequireModuleVisibilityChecker>(context, semantic_model);
+    run_check::<unknown_doc_tag::UnknownDocTag>(context, semantic_model);
+    run_check::<enum_value_mismatch::EnumValueMismatchChecker>(context, semantic_model);
+    run_check::<attribute_check::AttributeCheckChecker>(context, semantic_model);
 
     run_check::<code_style::non_literal_expressions_in_assert::NonLiteralExpressionsInAssertChecker>(
         context,
         semantic_model,
     );
+    run_check::<code_style::preferred_local_alias::PreferredLocalAliasChecker>(
+        context,
+        semantic_model,
+    );
+    run_check::<code_style::invert_if::InvertIfChecker>(context, semantic_model);
+    run_check::<readonly_check::ReadOnlyChecker>(context, semantic_model);
+    run_check::<global_non_module::GlobalInNonModuleChecker>(context, semantic_model);
     Some(())
 }
 
@@ -124,7 +148,7 @@ impl<'a> DiagnosticContext<'a> {
     }
 
     pub fn get_db(&self) -> &DbIndex {
-        &self.db
+        self.db
     }
 
     pub fn get_file_id(&self) -> FileId {
@@ -177,7 +201,7 @@ impl<'a> DiagnosticContext<'a> {
 
     fn get_severity(&self, code: DiagnosticCode) -> Option<DiagnosticSeverity> {
         if let Some(severity) = self.config.severity.get(&code) {
-            return Some(severity.clone());
+            return Some(*severity);
         }
 
         Some(get_default_severity(code))
@@ -219,12 +243,12 @@ impl<'a> DiagnosticContext<'a> {
         let db = self.get_db();
         let diagnostic_index = db.get_diagnostic_index();
         // force enable
-        if diagnostic_index.is_file_enabled(&file_id, &code) {
+        if diagnostic_index.is_file_enabled(&file_id, code) {
             return true;
         }
 
         // workspace force disabled
-        if self.config.workspace_disabled.contains(&code) {
+        if self.config.workspace_disabled.contains(code) {
             return false;
         }
 
@@ -235,17 +259,17 @@ impl<'a> DiagnosticContext<'a> {
         }
 
         // is file disabled this code
-        if diagnostic_index.is_file_disabled(&file_id, &code) {
+        if diagnostic_index.is_file_disabled(&file_id, code) {
             return false;
         }
 
         // workspace force enabled
-        if self.config.workspace_enabled.contains(&code) {
+        if self.config.workspace_enabled.contains(code) {
             return true;
         }
 
         // default setting
-        is_code_default_enable(&code)
+        is_code_default_enable(code, self.config.level)
     }
 }
 
@@ -271,7 +295,7 @@ pub fn get_return_stats(closure_expr: &LuaClosureExpr) -> impl Iterator<Item = L
         .filter(move |stat| {
             stat.ancestors::<LuaClosureExpr>()
                 .next()
-                .map_or(false, |expr| &expr == closure_expr)
+                .is_some_and(|expr| &expr == closure_expr)
         })
 }
 

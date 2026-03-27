@@ -5,11 +5,14 @@ use std::marker::PhantomData;
 
 use rowan::{TextRange, TextSize, WalkEvent};
 
-use crate::kind::{LuaSyntaxKind, LuaTokenKind};
+use crate::{
+    LuaAstPtr,
+    kind::{LuaSyntaxKind, LuaTokenKind},
+};
 
 use super::LuaSyntaxId;
 pub use super::{
-    node::*, LuaSyntaxElementChildren, LuaSyntaxNode, LuaSyntaxNodeChildren, LuaSyntaxToken,
+    LuaSyntaxElementChildren, LuaSyntaxNode, LuaSyntaxNodeChildren, LuaSyntaxToken, node::*,
 };
 pub use comment_trait::*;
 pub use description_trait::*;
@@ -94,8 +97,19 @@ pub trait LuaAstNode {
         LuaSyntaxId::from_node(self.syntax())
     }
 
+    fn get_text(&self) -> String {
+        format!("{}", self.syntax().text())
+    }
+
     fn dump(&self) -> String {
         format!("{:#?}", self.syntax())
+    }
+
+    fn to_ptr(&self) -> LuaAstPtr<Self>
+    where
+        Self: Sized,
+    {
+        LuaAstPtr::new(self)
     }
 }
 
@@ -153,6 +167,18 @@ pub trait LuaAstToken {
 
     fn get_text(&self) -> &str {
         self.syntax().text()
+    }
+
+    fn slice(&self, range: TextRange) -> Option<&str> {
+        let text = self.get_text();
+        let self_range = self.get_range();
+        if range.start() >= self_range.start() && range.end() <= self_range.end() {
+            let start = (range.start() - self_range.start()).into();
+            let end = (range.end() - self_range.start()).into();
+            text.get(start..end)
+        } else {
+            None
+        }
     }
 
     fn get_parent<N: LuaAstNode>(&self) -> Option<N> {

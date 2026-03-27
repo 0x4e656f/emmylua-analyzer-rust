@@ -3,7 +3,7 @@ use lsp_types::{CompletionItem, Documentation, MarkedString, MarkupContent};
 
 use crate::{
     context::ClientId,
-    handlers::hover::{build_hover_content_for_completion, HoverBuilder},
+    handlers::hover::{HoverBuilder, build_hover_content_for_completion},
 };
 
 use super::completion_data::{CompletionData, CompletionDataType};
@@ -22,10 +22,7 @@ pub fn resolve_completion(
             let hover_builder =
                 build_hover_content_for_completion(compilation, semantic_model, db, property_id);
             if let Some(mut hover_builder) = hover_builder {
-                update_function_signature_info(
-                    &mut hover_builder,
-                    completion_data.function_overload_count,
-                );
+                update_function_signature_info(&mut hover_builder, completion_data.overload_count);
                 if client_id.is_vscode() {
                     build_vscode_completion_item(completion_item, hover_builder, None);
                 } else {
@@ -37,10 +34,7 @@ pub fn resolve_completion(
             let hover_builder =
                 build_hover_content_for_completion(compilation, semantic_model, db, property_id);
             if let Some(mut hover_builder) = hover_builder {
-                update_function_signature_info(
-                    &mut hover_builder,
-                    completion_data.function_overload_count,
-                );
+                update_function_signature_info(&mut hover_builder, completion_data.overload_count);
                 if client_id.is_vscode() {
                     build_vscode_completion_item(completion_item, hover_builder, Some(index));
                 } else {
@@ -55,20 +49,20 @@ pub fn resolve_completion(
 
 pub fn update_function_signature_info(
     hover_builder: &mut HoverBuilder,
-    function_overload_count: Option<usize>,
+    overload_count: Option<usize>,
 ) {
-    if let Some(function_overload_count) = function_overload_count {
-        if function_overload_count > 0 {
-            if let Some(signature_overload) = &mut hover_builder.signature_overload {
-                for signature in signature_overload.iter_mut() {
-                    if let MarkedString::LanguageString(s) = signature {
-                        s.value = format!("{} (+{} overloads)", s.value, function_overload_count);
-                    }
+    if let Some(overload_count) = overload_count
+        && overload_count > 0
+    {
+        if let Some(signature_overload) = &mut hover_builder.signature_overload {
+            for signature in signature_overload.iter_mut() {
+                if let MarkedString::LanguageString(s) = signature {
+                    s.value = format!("{} (+{} overloads)", s.value, overload_count);
                 }
             }
-            if let MarkedString::LanguageString(s) = &mut hover_builder.type_description {
-                s.value = format!("{} (+{} overloads)", s.value, function_overload_count);
-            }
+        }
+        if let MarkedString::LanguageString(s) = &mut hover_builder.primary {
+            s.value = format!("{} (+{} overloads)", s.value, overload_count);
         }
     }
 }
@@ -84,7 +78,7 @@ fn build_vscode_completion_item(
                 .signature_overload
                 .and_then(|overloads| overloads.get(index).cloned())
         })
-        .unwrap_or_else(|| hover_builder.type_description.clone());
+        .unwrap_or_else(|| hover_builder.primary.clone());
 
     match type_description {
         MarkedString::String(s) => {
@@ -144,7 +138,7 @@ fn build_other_completion_item(
                 .signature_overload
                 .and_then(|overloads| overloads.get(index).cloned())
         })
-        .unwrap_or_else(|| hover_builder.type_description.clone());
+        .unwrap_or_else(|| hover_builder.primary.clone());
 
     match type_description {
         MarkedString::String(s) => {
@@ -154,13 +148,8 @@ fn build_other_completion_item(
             result.push_str(&format!("\n```{}\n{}\n```\n", s.language, s.value));
         }
     }
-    if let Some(location_path) = hover_builder.location_path {
-        match location_path {
-            MarkedString::String(s) => {
-                result.push_str(&format!("\n{}\n", s));
-            }
-            _ => {}
-        }
+    if let Some(MarkedString::String(s)) = hover_builder.location_path {
+        result.push_str(&format!("\n{}\n", s));
     }
     for marked_string in hover_builder.annotation_description {
         match marked_string {

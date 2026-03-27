@@ -82,7 +82,7 @@ mod test {
 
         assert!(ws.check_code_for(
             DiagnosticCode::MissingParameter,
-            r#" 
+            r#"
             ---@param a number
             ---@param b number
             ---@param c number
@@ -102,7 +102,7 @@ mod test {
 
         assert!(!ws.check_code_for(
             DiagnosticCode::MissingParameter,
-            r#" 
+            r#"
             ---@param a number
             ---@param b number
             ---@param c number
@@ -139,10 +139,10 @@ mod test {
             ---@param b number
             local function test(a,b)
             end
-            
+
             ---@type number[]
             local a = {1,2,3}
-            
+
             test(table.unpack(a))
         "#
         ));
@@ -192,6 +192,121 @@ mod test {
                 end
 
                 local a = A.foo(A)
+        "#
+        ));
+    }
+
+    #[test]
+    fn test_issue_633() {
+        let mut ws = VirtualWorkspace::new();
+        ws.def_file(
+            "test.lua",
+            r#"
+            ---@param mode number
+            ---@param a number
+            ---@param b number
+            ---@param c number
+            ---@param d number?
+            ---@return string
+            ---@overload fun(mode:number, a:number, b:number):number
+            function test(mode, a, b, c, d)
+            end
+
+            ---@return number, number
+            function getNumbers()
+                return 1, 2
+            end
+        "#,
+        );
+
+        assert!(ws.check_code_for_namespace(
+            DiagnosticCode::MissingParameter,
+            r#"
+            test(1, getNumbers())
+        "#
+        ));
+    }
+
+    #[test]
+    fn test_call_operator_implicit_self() {
+        let mut ws = VirtualWorkspace::new();
+
+        assert!(ws.check_code_for(
+            DiagnosticCode::MissingParameter,
+            r#"
+                ---@class Task
+                local Task = {}
+
+                ---@param callback fun()
+                function Task:await(callback)
+                end
+
+                ---@class TaskFun
+                ---@operator call: Task
+
+                ---@type TaskFun[]
+                local tasks = {}
+
+                tasks[1]():await(function()
+                end)
+        "#
+        ));
+    }
+
+    #[test]
+    fn test_call_overload_named_self_is_not_stripped() {
+        let mut ws = VirtualWorkspace::new();
+
+        assert!(!ws.check_code_for(
+            DiagnosticCode::MissingParameter,
+            r#"
+                ---@class Callable
+                ---@overload fun(self: string)
+                ---@type Callable
+                local c
+
+                c()
+        "#
+        ));
+
+        assert!(ws.check_code_for(
+            DiagnosticCode::MissingParameter,
+            r#"
+                ---@class Callable
+                ---@overload fun(self: string)
+                ---@type Callable
+                local c
+
+                c("x")
+        "#
+        ));
+    }
+
+    #[test]
+    fn test_call_overload_self_type_is_not_stripped() {
+        let mut ws = VirtualWorkspace::new();
+
+        assert!(!ws.check_code_for(
+            DiagnosticCode::MissingParameter,
+            r#"
+                ---@class Callable
+                ---@overload fun(self: self)
+                ---@type Callable
+                local c
+
+                c()
+        "#
+        ));
+
+        assert!(ws.check_code_for(
+            DiagnosticCode::MissingParameter,
+            r#"
+                ---@class Callable
+                ---@overload fun(self: self)
+                ---@type Callable
+                local c
+
+                c(c)
         "#
         ));
     }

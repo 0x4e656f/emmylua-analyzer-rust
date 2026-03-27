@@ -16,7 +16,7 @@
       }
     },
     "codeLens": {
-      "$ref": "#/$defs/EmmyrcCodeLen",
+      "$ref": "#/$defs/EmmyrcCodeLens",
       "default": {
         "enable": true
       }
@@ -46,16 +46,33 @@
         "severity": {}
       }
     },
+    "doc": {
+      "$ref": "#/$defs/EmmyrcDoc",
+      "default": {
+        "knownTags": [],
+        "privateName": [],
+        "syntax": "md"
+      }
+    },
     "documentColor": {
       "$ref": "#/$defs/EmmyrcDocumentColor",
       "default": {
         "enable": true
       }
     },
+    "format": {
+      "$ref": "#/$defs/EmmyrcReformat",
+      "default": {
+        "externalTool": null,
+        "externalToolRangeFormat": null,
+        "useDiff": false
+      }
+    },
     "hint": {
       "$ref": "#/$defs/EmmyrcInlayHint",
       "default": {
         "enable": true,
+        "enumParamHint": false,
         "indexHint": true,
         "localHint": true,
         "metaCallHint": true,
@@ -66,6 +83,7 @@
     "hover": {
       "$ref": "#/$defs/EmmyrcHover",
       "default": {
+        "customDetail": null,
         "enable": true
       }
     },
@@ -92,22 +110,20 @@
     "runtime": {
       "$ref": "#/$defs/EmmyrcRuntime",
       "default": {
-        "classDefaultCall": {
-          "forceNonColon": false,
-          "forceReturnSelf": false,
-          "functionName": ""
-        },
         "extensions": [],
         "frameworkVersions": [],
+        "nonstandardSymbol": [],
         "requireLikeFunction": [],
         "requirePattern": [],
+        "special": {},
         "version": "LuaLatest"
       }
     },
     "semanticTokens": {
       "$ref": "#/$defs/EmmyrcSemanticToken",
       "default": {
-        "enable": true
+        "enable": true,
+        "renderDocumentationMarkup": true
       }
     },
     "signature": {
@@ -122,6 +138,7 @@
         "arrayIndex": true,
         "docBaseConstMatchBaseType": true,
         "metaOverrideFileDefine": true,
+        "requireExportGlobal": false,
         "requirePath": false,
         "typeCall": false
       }
@@ -135,6 +152,7 @@
         "ignoreGlobs": [],
         "library": [],
         "moduleMap": [],
+        "packageDirs": [],
         "preloadFileSize": 0,
         "reindexDuration": 5000,
         "workspaceRoots": []
@@ -142,26 +160,6 @@
     }
   },
   "$defs": {
-    "ClassDefaultCall": {
-      "type": "object",
-      "properties": {
-        "forceNonColon": {
-          "description": "Mandatory non`:` definition. When `function_name` is not empty, it takes effect.",
-          "type": "boolean",
-          "default": true
-        },
-        "forceReturnSelf": {
-          "description": "Force to return `self`.",
-          "type": "boolean",
-          "default": true
-        },
-        "functionName": {
-          "description": "class default overload function. eg. \"__init\".",
-          "type": "string",
-          "default": ""
-        }
-      }
-    },
     "DiagnosticCode": {
       "oneOf": [
         {
@@ -193,7 +191,7 @@
         {
           "description": "Param Type not match",
           "type": "string",
-          "const": "param-type-not-match"
+          "const": "param-type-mismatch"
         },
         {
           "description": "Missing parameter",
@@ -311,6 +309,11 @@
           "const": "duplicate-doc-field"
         },
         {
+          "description": "Unknown doc annotation",
+          "type": "string",
+          "const": "unknown-doc-tag"
+        },
+        {
           "description": "Missing fields",
           "type": "string",
           "const": "missing-fields"
@@ -384,6 +387,61 @@
           "description": "cast-type-mismatch",
           "type": "string",
           "const": "cast-type-mismatch"
+        },
+        {
+          "description": "unresolved-require",
+          "type": "string",
+          "const": "unresolved-require"
+        },
+        {
+          "description": "require-module-not-visible",
+          "type": "string",
+          "const": "require-module-not-visible"
+        },
+        {
+          "description": "enum-value-mismatch",
+          "type": "string",
+          "const": "enum-value-mismatch"
+        },
+        {
+          "description": "preferred-local-alias",
+          "type": "string",
+          "const": "preferred-local-alias"
+        },
+        {
+          "description": "readonly",
+          "type": "string",
+          "const": "read-only"
+        },
+        {
+          "description": "Global variable defined in non-module scope",
+          "type": "string",
+          "const": "global-in-non-module"
+        },
+        {
+          "description": "attribute-param-type-mismatch",
+          "type": "string",
+          "const": "attribute-param-type-mismatch"
+        },
+        {
+          "description": "attribute-missing-parameter",
+          "type": "string",
+          "const": "attribute-missing-parameter"
+        },
+        {
+          "description": "attribute-redundant-parameter",
+          "type": "string",
+          "const": "attribute-redundant-parameter"
+        },
+        {
+          "description": "invert-if",
+          "type": "string",
+          "const": "invert-if"
+        },
+        {
+          "description": "Call to a non-callable value",
+          "type": "string",
+          "const": "call-non-callable"
         }
       ]
     },
@@ -411,23 +469,74 @@
         }
       ]
     },
+    "DocSyntax": {
+      "type": "string",
+      "enum": [
+        "none",
+        "md",
+        "myst",
+        "rst"
+      ]
+    },
+    "EmmyLibraryConfig": {
+      "type": "object",
+      "properties": {
+        "ignoreDir": {
+          "description": "Ignore directories within this library",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "ignoreGlobs": {
+          "description": "Ignore globs within this library. eg: [\"**/*.lua\"]",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "path": {
+          "description": "Library path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ]
+    },
+    "EmmyLibraryItem": {
+      "anyOf": [
+        {
+          "description": "Simple library path string",
+          "type": "string"
+        },
+        {
+          "description": "Library configuration with path and ignore rules",
+          "$ref": "#/$defs/EmmyLibraryConfig"
+        }
+      ]
+    },
     "EmmyrcCodeAction": {
       "type": "object",
       "properties": {
         "insertSpace": {
-          "description": "Whether to insert space after '---'",
+          "description": "Add space after `---` comments when inserting `@diagnostic disable-next-line`.",
           "type": "boolean",
-          "default": false
+          "default": false,
+          "x-vscode-setting": true
         }
       }
     },
-    "EmmyrcCodeLen": {
+    "EmmyrcCodeLens": {
       "type": "object",
       "properties": {
         "enable": {
-          "description": "Whether to enable code lens.",
+          "description": "Enable code lens.",
           "type": "boolean",
-          "default": true
+          "default": true,
+          "x-vscode-setting": true
         }
       }
     },
@@ -436,9 +545,10 @@
       "type": "object",
       "properties": {
         "autoRequire": {
-          "description": "Whether to automatically require modules.",
+          "description": "Automatically insert call to `require` when autocompletion\ninserts objects from other modules.",
           "type": "boolean",
-          "default": true
+          "default": true,
+          "x-vscode-setting": true
         },
         "autoRequireFunction": {
           "description": "The function used for auto-requiring modules.",
@@ -456,9 +566,10 @@
           "default": "."
         },
         "baseFunctionIncludesName": {
-          "description": "Whether to include the name in the base function completion. effect: `function () end` -> `function name() end`.",
+          "description": "Whether to include the name in the base function completion. Effect: `function () end` -> `function name() end`.",
           "type": "boolean",
-          "default": true
+          "default": true,
+          "x-vscode-setting": true
         },
         "callSnippet": {
           "description": "Whether to use call snippets in completions.",
@@ -466,14 +577,34 @@
           "default": false
         },
         "enable": {
-          "description": "Whether to enable code completion.",
+          "description": "Enable autocompletion.",
           "type": "boolean",
-          "default": true
+          "default": true,
+          "x-vscode-setting": true
         },
         "postfix": {
-          "description": "The postfix trigger used in completions.",
+          "description": "Symbol that's used to trigger postfix autocompletion.",
           "type": "string",
-          "default": "@"
+          "default": "@",
+          "x-vscode-setting": {
+            "default": null,
+            "enum": [
+              null,
+              "@",
+              ".",
+              ":"
+            ],
+            "enumItemLabels": [
+              "Default"
+            ],
+            "markdownEnumDescriptions": [
+              "%config.common.enum.default.description%"
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          }
         }
       }
     },
@@ -482,13 +613,14 @@
       "type": "object",
       "properties": {
         "diagnosticInterval": {
-          "description": "The interval in milliseconds to perform diagnostics.",
+          "description": "Delay between opening/changing a file and scanning it for errors, in milliseconds.",
           "type": [
             "integer",
             "null"
           ],
           "format": "uint64",
-          "minimum": 0
+          "minimum": 0,
+          "x-vscode-setting": true
         },
         "disable": {
           "description": "A list of diagnostic codes that are disabled.",
@@ -537,13 +669,79 @@
         }
       }
     },
+    "EmmyrcDoc": {
+      "type": "object",
+      "properties": {
+        "knownTags": {
+          "description": "List of known documentation tags.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "privateName": {
+          "description": "Treat specific field names as private, e.g. `m_*` means `XXX.m_id` and `XXX.m_type` are private, witch can only be accessed in the class where the definition is located.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "rstDefaultRole": {
+          "description": "When `syntax` is `Myst` or `Rst`, specifies default role used\nwith RST processor.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rstPrimaryDomain": {
+          "description": "When `syntax` is `Myst` or `Rst`, specifies primary domain used\nwith RST processor.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "syntax": {
+          "description": "Syntax for highlighting documentation.",
+          "$ref": "#/$defs/DocSyntax",
+          "default": "md"
+        }
+      }
+    },
     "EmmyrcDocumentColor": {
       "type": "object",
       "properties": {
         "enable": {
-          "description": "Whether to enable document color.",
+          "description": "Enable parsing strings for color tags and showing a color picker next to them.",
           "type": "boolean",
-          "default": true
+          "default": true,
+          "x-vscode-setting": true
+        }
+      }
+    },
+    "EmmyrcExternalTool": {
+      "type": "object",
+      "properties": {
+        "args": {
+          "description": "The arguments to pass to the external tool.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "program": {
+          "description": "The command to run the external tool.",
+          "type": "string",
+          "default": ""
+        },
+        "timeout": {
+          "description": "The timeout for the external tool in milliseconds.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 5000,
+          "minimum": 0
         }
       }
     },
@@ -579,10 +777,22 @@
     "EmmyrcHover": {
       "type": "object",
       "properties": {
+        "customDetail": {
+          "description": "The detail number of hover information.\nDefault is `None`, which means using the default detail level.\nYou can set it to a number between `1` and `255` to customize",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "default": null,
+          "maximum": 255,
+          "minimum": 0
+        },
         "enable": {
-          "description": "Whether to enable hover.",
+          "description": "Enable showing documentation on hover.",
           "type": "boolean",
-          "default": true
+          "default": true,
+          "x-vscode-setting": true
         }
       }
     },
@@ -590,34 +800,46 @@
       "type": "object",
       "properties": {
         "enable": {
-          "description": "Whether to enable inlay hints.",
+          "description": "Enable inlay hints.",
           "type": "boolean",
-          "default": true
+          "default": true,
+          "x-vscode-setting": true
+        },
+        "enumParamHint": {
+          "description": "Show name of enumerator when passing a literal value to a function\nthat expects an enum.\n\nExample:\n\n```lua\n--- @enum Level\nlocal Foo = {\n   Info = 1,\n   Error = 2,\n}\n\n--- @param l Level\nfunction print_level(l) end\n\nprint_level(1 --[[ Hint: Level.Info ]])\n```",
+          "type": "boolean",
+          "default": false,
+          "x-vscode-setting": true
         },
         "indexHint": {
-          "description": "Whether to enable index hints.",
+          "description": "Show named array indexes.\n\nExample:\n\n```lua\nlocal array = {\n   [1] = 1, -- [name]\n}\n\nprint(array[1] --[[ Hint: name ]])\n```",
           "type": "boolean",
-          "default": true
+          "default": true,
+          "x-vscode-setting": true
         },
         "localHint": {
-          "description": "Whether to enable local hints.\nWhether to enable override hints.",
+          "description": "Show types of local variables.",
           "type": "boolean",
-          "default": true
+          "default": true,
+          "x-vscode-setting": true
         },
         "metaCallHint": {
-          "description": "Whether to enable meta __call operator hints.",
+          "description": "Show hint when calling an object results in a call to\nits meta table's `__call` function.",
           "type": "boolean",
-          "default": true
+          "default": true,
+          "x-vscode-setting": true
         },
         "overrideHint": {
-          "description": "Whether to enable override hints.",
+          "description": "Show methods that override functions from base class.",
           "type": "boolean",
-          "default": true
+          "default": true,
+          "x-vscode-setting": true
         },
         "paramHint": {
-          "description": "Whether to enable parameter hints.",
+          "description": "Show parameter names in function calls and parameter types in function definitions.",
           "type": "boolean",
-          "default": true
+          "default": true,
+          "x-vscode-setting": true
         }
       }
     },
@@ -625,9 +847,10 @@
       "type": "object",
       "properties": {
         "enable": {
-          "description": "Whether to enable inline values.",
+          "description": "Show inline values during debug.",
           "type": "boolean",
-          "default": true
+          "default": true,
+          "x-vscode-setting": true
         }
       }
     },
@@ -670,21 +893,82 @@
         }
       ]
     },
+    "EmmyrcNonStdSymbol": {
+      "type": "string",
+      "enum": [
+        "//",
+        "/**/",
+        "`",
+        "+=",
+        "-=",
+        "*=",
+        "/=",
+        "%=",
+        "^=",
+        "//=",
+        "|=",
+        "&=",
+        "<<=",
+        ">>=",
+        "||",
+        "&&",
+        "!",
+        "!=",
+        "continue"
+      ]
+    },
     "EmmyrcReference": {
       "type": "object",
       "properties": {
         "enable": {
-          "description": "Whether to enable reference search.",
+          "description": "Enable searching for symbol usages.",
           "type": "boolean",
-          "default": true
+          "default": true,
+          "x-vscode-setting": true
         },
         "fuzzySearch": {
-          "description": "Determines whether to enable fuzzy searching for fields where references cannot be found.",
+          "description": "Use fuzzy search when searching for symbol usages\nand normal search didn't find anything.",
           "type": "boolean",
-          "default": true
+          "default": true,
+          "x-vscode-setting": true
         },
         "shortStringSearch": {
-          "description": "Cache Short string for search",
+          "description": "Also search for usages in strings.",
+          "type": "boolean",
+          "default": false,
+          "x-vscode-setting": true
+        }
+      }
+    },
+    "EmmyrcReformat": {
+      "type": "object",
+      "properties": {
+        "externalTool": {
+          "description": "Whether to enable external tool formatting.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EmmyrcExternalTool"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "externalToolRangeFormat": {
+          "description": "Whether to enable external tool range formatting.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EmmyrcExternalTool"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "useDiff": {
+          "description": "Whether to use the diff algorithm for formatting.",
           "type": "boolean",
           "default": false
         }
@@ -705,15 +989,6 @@
     "EmmyrcRuntime": {
       "type": "object",
       "properties": {
-        "classDefaultCall": {
-          "description": "class default overload function.",
-          "$ref": "#/$defs/ClassDefaultCall",
-          "default": {
-            "forceNonColon": false,
-            "forceReturnSelf": false,
-            "functionName": ""
-          }
-        },
         "extensions": {
           "description": "file Extensions. eg: .lua, .lua.txt",
           "type": "array",
@@ -728,6 +1003,14 @@
           "default": [],
           "items": {
             "type": "string"
+          }
+        },
+        "nonstandardSymbol": {
+          "description": "Non-standard symbols.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/EmmyrcNonStdSymbol"
           }
         },
         "requireLikeFunction": {
@@ -746,6 +1029,14 @@
             "type": "string"
           }
         },
+        "special": {
+          "description": "Special symbols.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/EmmyrcSpecialSymbol"
+          },
+          "default": {}
+        },
         "version": {
           "description": "Lua version.",
           "$ref": "#/$defs/EmmyrcLuaVersion",
@@ -757,9 +1048,16 @@
       "type": "object",
       "properties": {
         "enable": {
-          "description": "Whether to enable semantic token.",
+          "description": "Enable semantic tokens.",
           "type": "boolean",
-          "default": true
+          "default": true,
+          "x-vscode-setting": true
+        },
+        "renderDocumentationMarkup": {
+          "description": "Render Markdown/RST in documentation. Set `doc.syntax` for this option to have effect.",
+          "type": "boolean",
+          "default": false,
+          "x-vscode-setting": true
         }
       }
     },
@@ -772,6 +1070,17 @@
           "default": true
         }
       }
+    },
+    "EmmyrcSpecialSymbol": {
+      "type": "string",
+      "enum": [
+        "none",
+        "require",
+        "error",
+        "assert",
+        "type",
+        "setmetatable"
+      ]
     },
     "EmmyrcStrict": {
       "type": "object",
@@ -791,6 +1100,11 @@
           "type": "boolean",
           "default": true
         },
+        "requireExportGlobal": {
+          "description": "This option limits the visibility of third-party libraries.\n\nWhen enabled, third-party libraries must use `---@export global` annotation to be importable (i.e., no diagnostic errors and visible in auto-import).",
+          "type": "boolean",
+          "default": false
+        },
         "requirePath": {
           "description": "Whether to enable strict mode require path.",
           "type": "boolean",
@@ -806,9 +1120,10 @@
       "type": "object",
       "properties": {
         "enableReindex": {
-          "description": "Enable reindex.",
+          "description": "Enable full project reindex after changing a file.",
           "type": "boolean",
-          "default": false
+          "default": false,
+          "x-vscode-setting": true
         },
         "encoding": {
           "description": "Encoding. eg: \"utf-8\"",
@@ -832,11 +1147,11 @@
           }
         },
         "library": {
-          "description": "Library paths. eg: \"/usr/local/share/lua/5.1\"",
+          "description": "Library paths. Can be a string path or an object with path and ignore rules.\neg: [\"/usr/local/share/lua/5.1\"] or [{\"path\": \"/usr/local/share/lua/5.1\", \"ignoreDir\": [\"test\"], \"ignoreGlobs\": [\"**/*.spec.lua\"]}]",
           "type": "array",
           "default": [],
           "items": {
-            "type": "string"
+            "$ref": "#/$defs/EmmyLibraryItem"
           }
         },
         "moduleMap": {
@@ -847,17 +1162,26 @@
             "$ref": "#/$defs/EmmyrcWorkspaceModuleMap"
           }
         },
+        "packageDirs": {
+          "description": "Package directories. Treat the parent directory as a `library`, but only add files from the specified directory.\neg: `/usr/local/share/lua/5.1/module`",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
         "preloadFileSize": {
           "type": "integer",
           "format": "int32",
           "default": 0
         },
         "reindexDuration": {
-          "description": "when save a file, ls will reindex the workspace after reindex_duration milliseconds.",
+          "description": "Delay between changing a file and full project reindex, in milliseconds.",
           "type": "integer",
           "format": "uint64",
           "default": 5000,
-          "minimum": 0
+          "minimum": 0,
+          "x-vscode-setting": true
         },
         "workspaceRoots": {
           "description": "Workspace roots. eg: [\"src\", \"test\"]",

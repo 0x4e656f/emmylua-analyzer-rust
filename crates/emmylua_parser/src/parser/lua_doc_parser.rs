@@ -8,6 +8,13 @@ use crate::{
 
 use super::{LuaParser, MarkEvent, MarkerEventContainer};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LuaDocParserState {
+    Normal,
+    Mapped,
+    Extends,
+}
+
 pub struct LuaDocParser<'a, 'b> {
     lua_parser: &'a mut LuaParser<'b>,
     tokens: &'a [LuaTokenData],
@@ -15,6 +22,7 @@ pub struct LuaDocParser<'a, 'b> {
     current_token: LuaTokenKind,
     current_token_range: SourceRange,
     origin_token_index: usize,
+    pub state: LuaDocParserState,
 }
 
 impl MarkerEventContainer for LuaDocParser<'_, '_> {
@@ -35,7 +43,7 @@ impl MarkerEventContainer for LuaDocParser<'_, '_> {
     }
 }
 
-impl LuaDocParser<'_, '_> {
+impl<'b> LuaDocParser<'_, 'b> {
     pub fn parse(lua_parser: &mut LuaParser<'_>, tokens: &[LuaTokenData]) {
         let lexer = LuaDocLexer::new(lua_parser.origin_text());
 
@@ -46,6 +54,7 @@ impl LuaDocParser<'_, '_> {
             current_token: LuaTokenKind::None,
             current_token_range: SourceRange::EMPTY,
             origin_token_index: 0,
+            state: LuaDocParserState::Normal,
         };
 
         parser.init();
@@ -74,16 +83,17 @@ impl LuaDocParser<'_, '_> {
     fn calc_next_current_token(&mut self) {
         let token = self.lex_token();
         self.current_token = token.kind;
-        if !token.range.is_empty() {
-            self.current_token_range = token.range;
-        }
+        self.current_token_range = token.range;
 
         if self.current_token == LuaTokenKind::TkEof {
             return;
         }
 
         match self.lexer.state {
-            LuaDocLexerState::Normal | LuaDocLexerState::Version => {
+            LuaDocLexerState::Normal
+            | LuaDocLexerState::Version
+            | LuaDocLexerState::Mapped
+            | LuaDocLexerState::Extends => {
                 while matches!(
                     self.current_token,
                     LuaTokenKind::TkDocContinue
@@ -93,7 +103,10 @@ impl LuaDocParser<'_, '_> {
                     self.eat_current_and_lex_next();
                 }
             }
-            LuaDocLexerState::FieldStart | LuaDocLexerState::See | LuaDocLexerState::Source => {
+            LuaDocLexerState::FieldStart
+            | LuaDocLexerState::See
+            | LuaDocLexerState::Source
+            | LuaDocLexerState::AttributeUse => {
                 while matches!(self.current_token, LuaTokenKind::TkWhitespace) {
                     self.eat_current_and_lex_next();
                 }
@@ -141,7 +154,10 @@ impl LuaDocParser<'_, '_> {
                         self.origin_token_index + 1
                     };
                 if next_origin_index >= self.tokens.len() {
-                    return LuaTokenData::new(LuaTokenKind::TkEof, SourceRange::EMPTY);
+                    return LuaTokenData::new(
+                        LuaTokenKind::TkEof,
+                        SourceRange::new(self.current_token_range.end_offset(), 0),
+                    );
                 }
 
                 let next_origin_token = self.tokens[next_origin_index];
@@ -174,13 +190,16 @@ impl LuaDocParser<'_, '_> {
         self.current_token_range
     }
 
-    pub fn current_token_text(&self) -> &str {
-        let source_text = self.lua_parser.origin_text();
+    pub fn current_token_text(&self) -> &'b str {
         let range = self.current_token_range;
-        &source_text[range.start_offset..range.end_offset()]
+        &self.origin_text()[range.start_offset..range.end_offset()]
     }
 
-    pub fn set_state(&mut self, state: LuaDocLexerState) {
+    pub fn origin_text(&self) -> &'b str {
+        self.lua_parser.origin_text()
+    }
+
+    pub fn set_lexer_state(&mut self, state: LuaDocLexerState) {
         match state {
             LuaDocLexerState::Description => {
                 if !matches!(
@@ -265,20 +284,25 @@ impl LuaDocParser<'_, '_> {
     }
 
     pub fn bump_to_end(&mut self) {
-        self.set_state(LuaDocLexerState::Trivia);
+        self.set_lexer_state(LuaDocLexerState::Trivia);
         self.eat_current_and_lex_next();
-        self.set_state(LuaDocLexerState::Init);
+        self.set_lexer_state(LuaDocLexerState::Init);
         self.bump();
     }
 
     pub fn push_error(&mut self, error: LuaParseError) {
         self.lua_parser.errors.push(error);
     }
+
+    pub fn set_parser_state(&mut self, state: LuaDocParserState) {
+        self.state = state;
+    }
+
+    pub fn set_current_token_kind(&mut self, kind: LuaTokenKind) {
+        self.current_token = kind;
+    }
 }
 
 fn is_invalid_kind(kind: LuaTokenKind) -> bool {
-    match kind {
-        LuaTokenKind::None | LuaTokenKind::TkEof => true,
-        _ => false,
-    }
+    matches!(kind, LuaTokenKind::None | LuaTokenKind::TkEof)
 }

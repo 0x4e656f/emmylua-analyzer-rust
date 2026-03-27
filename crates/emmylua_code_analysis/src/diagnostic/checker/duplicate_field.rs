@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use emmylua_parser::{
-    LuaAstNode, LuaDocTagField, LuaIndexExpr, LuaStat, LuaSyntaxKind, LuaSyntaxNode,
+    LuaAstNode, LuaDocTagClass, LuaDocTagField, LuaIndexExpr, LuaStat, LuaSyntaxKind, LuaSyntaxNode,
 };
 
 use crate::{
@@ -37,13 +37,10 @@ struct DeclInfo {
 
 fn get_decl_set(semantic_model: &SemanticModel) -> Option<HashSet<DeclInfo>> {
     let file_id = semantic_model.get_file_id();
-    let Some(decl_tree) = semantic_model
+    let decl_tree = semantic_model
         .get_db()
         .get_decl_index()
-        .get_decl_tree(&file_id)
-    else {
-        return None;
-    };
+        .get_decl_tree(&file_id)?;
     let mut type_decl_id_set = HashSet::new();
     for (decl_id, decl) in decl_tree.get_decls() {
         if matches!(
@@ -51,12 +48,33 @@ fn get_decl_set(semantic_model: &SemanticModel) -> Option<HashSet<DeclInfo>> {
             LuaDeclExtra::Local { .. } | LuaDeclExtra::Global { .. }
         ) {
             let decl_type = semantic_model.get_type((*decl_id).into());
-            if let LuaType::Def(id) = decl_type {
-                type_decl_id_set.insert(DeclInfo {
-                    id,
-                    is_require: is_require_decl(&decl),
-                });
+            match decl_type {
+                LuaType::Def(id) => {
+                    type_decl_id_set.insert(DeclInfo {
+                        id,
+                        is_require: is_require_decl(decl),
+                    });
+                }
+                LuaType::Ref(id) => {
+                    if is_require_decl(decl) {
+                        type_decl_id_set.insert(DeclInfo {
+                            id,
+                            is_require: true,
+                        });
+                    }
+                }
+                _ => {}
             }
+        }
+    }
+
+    let root = semantic_model.get_root();
+    for tag_class in root.descendants::<LuaDocTagClass>() {
+        if let Some(class_name) = tag_class.get_name_token() {
+            type_decl_id_set.insert(DeclInfo {
+                id: LuaTypeDeclId::global(class_name.get_name_text()),
+                is_require: false,
+            });
         }
     }
 
@@ -96,16 +114,13 @@ fn check_decl_duplicate_field(
 
     for member in members.iter() {
         // 过滤掉 meta 定义的 signature
-        match member.get_feature() {
-            LuaMemberFeature::MetaMethodDecl => {
-                continue;
-            }
-            _ => {}
+        if member.get_feature() == LuaMemberFeature::MetaMethodDecl {
+            continue;
         }
 
         member_map
             .entry(member.get_key())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(*member);
     }
 
@@ -179,12 +194,16 @@ fn check_decl_duplicate_field(
     Some(())
 }
 
+/// 特殊处理: require("a").fun = function() end
 fn check_one_member(
     context: &mut DiagnosticContext,
     semantic_model: &SemanticModel,
     member: &LuaMember,
     is_require: bool,
 ) -> Option<()> {
+    if !is_require {
+        return None;
+    }
     let key = member.get_key();
     let member_id = member.get_id();
     let typ = semantic_model.get_type(member.get_id().into());
@@ -195,7 +214,7 @@ fn check_one_member(
     let references = semantic_model
         .get_db()
         .get_reference_index()
-        .get_index_references(&key)?;
+        .get_index_references(key)?;
     let root = semantic_model.get_root().syntax();
     let property_owner = LuaSemanticDeclId::Member(member_id);
 
@@ -219,7 +238,7 @@ fn check_one_member(
         }
 
         // 如果不是赋值则不需要检查
-        if check_function_member_is_set(&semantic_model, &node, is_require).is_none() {
+        if check_function_member_is_set(semantic_model, &node, is_require).is_none() {
             continue;
         }
 
@@ -234,7 +253,7 @@ fn check_one_member(
     Some(())
 }
 
-/// 检查是否是 .member = newValue
+/// 检查是否是 require("a").member = newValue
 fn check_function_member_is_set(
     semantic_model: &SemanticModel,
     node: &LuaSyntaxNode,
@@ -243,15 +262,10 @@ fn check_function_member_is_set(
     match node {
         expr_node if LuaIndexExpr::can_cast(expr_node.kind().into()) => {
             let expr = LuaIndexExpr::cast(expr_node.clone())?;
-            let prefix_type = semantic_model
-                .infer_expr(expr.get_prefix_expr()?.into())
-                .ok()?;
-            match prefix_type {
-                LuaType::Ref(_) => {
-                    return None;
-                }
-                _ => {}
-            };
+            let prefix_type = semantic_model.infer_expr(expr.get_prefix_expr()?).ok()?;
+            if let LuaType::Def(_) = prefix_type {
+                return None;
+            }
             // 往上寻找 stat 节点
             let stat = expr.ancestors::<LuaStat>().next()?;
             match stat {
@@ -273,8 +287,7 @@ fn check_function_member_is_set(
                             }
                             // 确定右侧表达式是否是 signature
                             if let Some(expr) = exprs.get(i) {
-                                let expr_type =
-                                    semantic_model.infer_expr(expr.clone().into()).ok()?;
+                                let expr_type = semantic_model.infer_expr(expr.clone()).ok()?;
                                 if matches!(expr_type, LuaType::Signature(_)) {
                                     return Some(());
                                 }

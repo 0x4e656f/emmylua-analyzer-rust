@@ -2,10 +2,12 @@ mod goto_def_definition;
 mod goto_doc_see;
 mod goto_function;
 mod goto_module_file;
+mod goto_path;
 
-use emmylua_code_analysis::{EmmyLuaAnalysis, FileId, SemanticDeclLevel};
+use emmylua_code_analysis::{EmmyLuaAnalysis, FileId, SemanticDeclLevel, WorkspaceId};
 use emmylua_parser::{
-    LuaAstNode, LuaAstToken, LuaDocTagSee, LuaGeneralToken, LuaStringToken, LuaTokenKind,
+    LuaAstNode, LuaAstToken, LuaDocDescription, LuaDocTagSee, LuaGeneralToken, LuaStringToken,
+    LuaTokenKind,
 };
 pub use goto_def_definition::goto_def_definition;
 use goto_def_definition::goto_str_tpl_ref_definition;
@@ -19,9 +21,11 @@ use lsp_types::{
 use rowan::TokenAtOffset;
 use tokio_util::sync::CancellationToken;
 
-use crate::context::ServerContextSnapshot;
-
 use super::RegisterCapabilities;
+use crate::context::ServerContextSnapshot;
+use crate::handlers::definition::goto_function::goto_overload_function;
+use crate::handlers::definition::goto_path::goto_path;
+use crate::util::find_ref_at;
 
 pub async fn on_goto_definition_handler(
     context: ServerContextSnapshot,
@@ -29,7 +33,7 @@ pub async fn on_goto_definition_handler(
     _: CancellationToken,
 ) -> Option<GotoDefinitionResponse> {
     let uri = params.text_document_position_params.text_document.uri;
-    let analysis = context.analysis.read().await;
+    let analysis = context.analysis().read().await;
     let file_id = analysis.get_file_id(&uri)?;
     let position = params.text_document_position_params.position;
 
@@ -51,11 +55,13 @@ pub fn definition(
     if position_offset > root.syntax().text_range().end() {
         return None;
     }
-
     let token = match root.syntax().token_at_offset(position_offset) {
         TokenAtOffset::Single(token) => token,
         TokenAtOffset::Between(left, right) => {
-            if left.kind() == LuaTokenKind::TkName.into() {
+            if left.kind() == LuaTokenKind::TkName.into()
+                || (left.kind() == LuaTokenKind::TkLeftBracket.into()
+                    && right.kind() == LuaTokenKind::TkInt.into())
+            {
                 left
             } else {
                 right
@@ -86,15 +92,36 @@ pub fn definition(
         }
     } else if token.kind() == LuaTokenKind::TkDocSeeContent.into() {
         let general_token = LuaGeneralToken::cast(token.clone())?;
-        if let Some(_) = general_token.get_parent::<LuaDocTagSee>() {
-            return goto_doc_see(&semantic_model, general_token);
+        if general_token.get_parent::<LuaDocTagSee>().is_some() {
+            return goto_doc_see(
+                &semantic_model,
+                &analysis.compilation,
+                general_token,
+                position_offset,
+            );
         }
+    } else if token.kind() == LuaTokenKind::TkDocDetail.into() {
+        let parent = token.parent()?;
+        let description = LuaDocDescription::cast(parent)?;
+        let document = semantic_model.get_document();
+
+        let path = find_ref_at(
+            semantic_model
+                .get_module()
+                .map(|m| m.workspace_id)
+                .unwrap_or(WorkspaceId::MAIN),
+            semantic_model.get_emmyrc(),
+            document.get_text(),
+            description.clone(),
+            position_offset,
+        )?;
+
+        return goto_path(&semantic_model, &analysis.compilation, &path, &token);
+    } else if token.kind() == LuaTokenKind::TkTagOverload.into() {
+        return goto_overload_function(&semantic_model, &token);
     }
 
-    // goto self
-    let document = semantic_model.get_document();
-    let lsp_location = document.to_lsp_location(token.text_range())?;
-    Some(GotoDefinitionResponse::Scalar(lsp_location))
+    None
 }
 
 pub struct DefinitionCapabilities;

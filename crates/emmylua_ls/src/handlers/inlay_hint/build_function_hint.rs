@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use emmylua_code_analysis::{
-    format_union_type, humanize_type, LuaSignatureId, LuaType, LuaUnionType, RenderLevel,
-    SemanticModel,
+    LuaSignatureId, LuaType, LuaUnionType, RenderLevel, SemanticModel, format_union_type,
+    humanize_type,
 };
 use emmylua_parser::{LuaAstNode, LuaClosureExpr};
 use itertools::Itertools;
@@ -45,17 +45,17 @@ pub fn build_closure_hint(
             if let Some(lua_param) = lua_params_map.get(signature_param_name) {
                 let lsp_range = document.to_lsp_range(lua_param.get_range())?;
                 // 构造 label
-                let mut label_parts = build_label_parts(semantic_model, &typ);
+                let mut label_parts = build_label_parts(semantic_model, typ);
                 // 为空时添加默认值
                 if label_parts.is_empty() {
                     let typ_desc = format!(
                         ": {}",
-                        hint_humanize_type(semantic_model, &typ, RenderLevel::Simple)
+                        hint_humanize_type(semantic_model, typ, RenderLevel::Simple)
                     );
                     label_parts.push(InlayHintLabelPart {
                         value: typ_desc,
                         location: Some(
-                            get_type_location(semantic_model, typ)
+                            get_type_location(semantic_model, typ, 0)
                                 .unwrap_or(Location::new(document.get_uri(), lsp_range)),
                         ),
                         ..Default::default()
@@ -83,8 +83,8 @@ pub fn build_label_parts(semantic_model: &SemanticModel, typ: &LuaType) -> Vec<I
     let mut parts: Vec<InlayHintLabelPart> = Vec::new();
     match typ {
         LuaType::Union(union) => {
-            for typ in union.get_types() {
-                if let Some(part) = get_part(semantic_model, typ) {
+            for typ in union.into_vec() {
+                if let Some(part) = get_part(semantic_model, &typ) {
                     parts.push(part);
                 }
             }
@@ -129,38 +129,46 @@ pub fn build_label_parts(semantic_model: &SemanticModel, typ: &LuaType) -> Vec<I
 fn get_part(semantic_model: &SemanticModel, typ: &LuaType) -> Option<InlayHintLabelPart> {
     match typ {
         LuaType::Union(_) => None,
-        LuaType::Nil => {
-            return Some(InlayHintLabelPart {
-                value: "?".to_string(),
-                location: get_type_location(semantic_model, typ),
-                ..Default::default()
-            });
-        }
+        LuaType::Nil => Some(InlayHintLabelPart {
+            value: "?".to_string(),
+            location: get_type_location(semantic_model, typ, 0),
+            ..Default::default()
+        }),
         _ => {
             let value = hint_humanize_type(semantic_model, typ, RenderLevel::Simple);
-            let location = get_type_location(semantic_model, typ);
-            return Some(InlayHintLabelPart {
+            let location = get_type_location(semantic_model, typ, 0);
+            Some(InlayHintLabelPart {
                 value,
                 location,
                 ..Default::default()
-            });
+            })
         }
     }
 }
 
-fn get_type_location(semantic_model: &SemanticModel, typ: &LuaType) -> Option<Location> {
+fn get_type_location(
+    semantic_model: &SemanticModel,
+    typ: &LuaType,
+    depth: usize,
+) -> Option<Location> {
+    if depth > 10 {
+        return None;
+    }
     match typ {
         LuaType::Ref(id) | LuaType::Def(id) => {
-            let type_decl = semantic_model
-                .get_db()
-                .get_type_index()
-                .get_type_decl(&id)?;
+            let type_decl = semantic_model.get_db().get_type_index().get_type_decl(id)?;
             let location = type_decl.get_locations().first()?;
             let document = semantic_model.get_document_by_file_id(location.file_id)?;
             let lsp_range = document.to_lsp_range(location.range)?;
             Some(Location::new(document.get_uri(), lsp_range))
         }
-        LuaType::Array(base) => get_type_location(semantic_model, base),
+        LuaType::Generic(generic) => {
+            let base_type_id = generic.get_base_type_id();
+            get_type_location(semantic_model, &LuaType::Ref(base_type_id), depth + 1)
+        }
+        LuaType::Array(array_type) => {
+            get_type_location(semantic_model, array_type.get_base(), depth + 1)
+        }
         LuaType::Any => get_base_type_location(semantic_model, "any"),
         LuaType::Nil => get_base_type_location(semantic_model, "nil"),
         LuaType::Unknown => get_base_type_location(semantic_model, "unknown"),
@@ -189,23 +197,20 @@ fn get_base_type_location(semantic_model: &SemanticModel, name: &str) -> Option<
 
 fn hint_humanize_type(semantic_model: &SemanticModel, typ: &LuaType, level: RenderLevel) -> String {
     match typ {
-        LuaType::Ref(id) | LuaType::Def(id) => {
-            let namespace = semantic_model
-                .get_db()
-                .get_type_index()
-                .get_file_namespace(&semantic_model.get_file_id());
-            if let Some(namespace) = namespace {
-                // 如果 id 最前面是 namespace, 那么移除
-                let id_name = id.get_name();
-                let namespace_prefix = format!("{}.", namespace);
-                if id_name.starts_with(&namespace_prefix) {
-                    id_name[namespace_prefix.len()..].to_string()
-                } else {
-                    id_name.to_string()
-                }
-            } else {
-                id.get_name().to_string()
-            }
+        LuaType::Ref(id) | LuaType::Def(id) => id.get_simple_name().to_string(),
+        LuaType::Generic(generic) => {
+            let base_type_id = generic.get_base_type_id();
+            let base_type_name =
+                hint_humanize_type(semantic_model, &LuaType::Ref(base_type_id), level);
+
+            let generic_params = generic
+                .get_params()
+                .iter()
+                .map(|ty| hint_humanize_type(semantic_model, ty, level.next_level()))
+                .collect::<Vec<_>>()
+                .join(",");
+
+            format!("{}<{}>", base_type_name, generic_params)
         }
         LuaType::Union(union) => hint_humanize_union_type(semantic_model, union, level),
         _ => humanize_type(semantic_model.get_db(), typ, level),

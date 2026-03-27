@@ -11,9 +11,9 @@ use super::{
     LuaAst, LuaBinaryOpToken, LuaLiteralToken, LuaNameToken, LuaNumberToken, LuaStringToken,
 };
 use crate::{
+    LuaAstChildren, LuaAstToken, LuaAstTokenChildren, LuaKind, LuaLiteralExpr, LuaSyntaxNode,
     kind::{LuaSyntaxKind, LuaTokenKind},
     syntax::traits::LuaAstNode,
-    LuaAstChildren, LuaAstToken, LuaAstTokenChildren, LuaKind, LuaSyntaxNode,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -45,6 +45,19 @@ impl LuaAstNode for LuaComment {
     }
 }
 
+/// 检查语法节点是否为附加性质的文档标签
+///
+/// 附加性质的标签不会阻止查找 DocDescription
+fn is_additive_doc_tag(kind: LuaSyntaxKind) -> bool {
+    matches!(
+        kind,
+        LuaSyntaxKind::DocTagVisibility
+            | LuaSyntaxKind::DocTagExport
+            | LuaSyntaxKind::DocTagVersion
+            | LuaSyntaxKind::DocTagNodiscard
+    )
+}
+
 impl LuaComment {
     pub fn get_owner(&self) -> Option<LuaAst> {
         if let Some(inline_node) = find_inline_node(&self.syntax) {
@@ -66,8 +79,11 @@ impl LuaComment {
                 LuaKind::Syntax(LuaSyntaxKind::DocDescription) => {
                     return LuaDocDescription::cast(child.into_node().unwrap());
                 }
-                LuaKind::Token(LuaTokenKind::TkDocStart) => {
-                    return None;
+                LuaKind::Token(LuaTokenKind::TkDocStart) => {}
+                LuaKind::Syntax(syntax_kind) => {
+                    if !is_additive_doc_tag(syntax_kind) {
+                        return None;
+                    }
                 }
                 _ => {}
             }
@@ -221,6 +237,10 @@ impl LuaDocGenericDecl {
 
     pub fn get_type(&self) -> Option<LuaDocType> {
         self.child()
+    }
+
+    pub fn is_variadic(&self) -> bool {
+        self.token_by_kind(LuaTokenKind::TkDots).is_some()
     }
 }
 
@@ -388,11 +408,11 @@ pub enum LuaDocObjectFieldKey {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct LuaDocAttribute {
+pub struct LuaDocTypeFlag {
     syntax: LuaSyntaxNode,
 }
 
-impl LuaAstNode for LuaDocAttribute {
+impl LuaAstNode for LuaDocTypeFlag {
     fn syntax(&self) -> &LuaSyntaxNode {
         &self.syntax
     }
@@ -401,7 +421,7 @@ impl LuaAstNode for LuaDocAttribute {
     where
         Self: Sized,
     {
-        kind == LuaSyntaxKind::DocAttribute
+        kind == LuaSyntaxKind::DocTypeFlag
     }
 
     fn cast(syntax: LuaSyntaxNode) -> Option<Self>
@@ -416,7 +436,7 @@ impl LuaAstNode for LuaDocAttribute {
     }
 }
 
-impl LuaDocAttribute {
+impl LuaDocTypeFlag {
     pub fn get_attrib_tokens(&self) -> LuaAstTokenChildren<LuaNameToken> {
         self.tokens()
     }
@@ -465,5 +485,114 @@ impl LuaDocNamedReturnType {
         } else {
             (None, None)
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct LuaDocAttributeUse {
+    syntax: LuaSyntaxNode,
+}
+
+impl LuaAstNode for LuaDocAttributeUse {
+    fn syntax(&self) -> &LuaSyntaxNode {
+        &self.syntax
+    }
+
+    fn can_cast(kind: LuaSyntaxKind) -> bool
+    where
+        Self: Sized,
+    {
+        kind == LuaSyntaxKind::DocAttributeUse
+    }
+
+    fn cast(syntax: LuaSyntaxNode) -> Option<Self>
+    where
+        Self: Sized,
+    {
+        if Self::can_cast(syntax.kind().into()) {
+            Some(Self { syntax })
+        } else {
+            None
+        }
+    }
+}
+
+impl LuaDocAttributeUse {
+    pub fn get_type(&self) -> Option<LuaDocNameType> {
+        self.child()
+    }
+
+    pub fn get_arg_list(&self) -> Option<LuaDocAttributeCallArgList> {
+        self.child()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct LuaDocAttributeCallArgList {
+    syntax: LuaSyntaxNode,
+}
+
+impl LuaAstNode for LuaDocAttributeCallArgList {
+    fn syntax(&self) -> &LuaSyntaxNode {
+        &self.syntax
+    }
+
+    fn can_cast(kind: LuaSyntaxKind) -> bool
+    where
+        Self: Sized,
+    {
+        kind == LuaSyntaxKind::DocAttributeCallArgList
+    }
+
+    fn cast(syntax: LuaSyntaxNode) -> Option<Self>
+    where
+        Self: Sized,
+    {
+        if Self::can_cast(syntax.kind().into()) {
+            Some(Self { syntax })
+        } else {
+            None
+        }
+    }
+}
+
+impl LuaDocAttributeCallArgList {
+    pub fn get_args(&self) -> LuaAstChildren<LuaLiteralExpr> {
+        self.children()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct LuaDocTagCallGeneric {
+    syntax: LuaSyntaxNode,
+}
+
+impl LuaAstNode for LuaDocTagCallGeneric {
+    fn syntax(&self) -> &LuaSyntaxNode {
+        &self.syntax
+    }
+
+    fn can_cast(kind: LuaSyntaxKind) -> bool
+    where
+        Self: Sized,
+    {
+        kind == LuaSyntaxKind::DocTagCallGeneric
+    }
+
+    fn cast(syntax: LuaSyntaxNode) -> Option<Self>
+    where
+        Self: Sized,
+    {
+        if Self::can_cast(syntax.kind().into()) {
+            Some(Self { syntax })
+        } else {
+            None
+        }
+    }
+}
+
+impl LuaDocTagCallGeneric {
+    pub fn get_type_list(&self) -> Option<LuaDocTypeList> {
+        self.child()
     }
 }

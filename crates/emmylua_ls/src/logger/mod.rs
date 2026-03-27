@@ -6,7 +6,7 @@ use best_log_path::get_best_log_dir;
 use chrono::Local;
 use emmylua_code_analysis::file_path_to_uri;
 use fern::Dispatch;
-use log::{info, LevelFilter};
+use log::{LevelFilter, info};
 
 use crate::cmd_args::{CmdArgs, LogLevel};
 
@@ -22,18 +22,18 @@ pub fn init_logger(root: Option<&str>, cmd_args: &CmdArgs) {
     };
 
     let cmd_log_path = cmd_args.log_path.clone();
-    if root.is_none() || cmd_log_path.0.is_none() {
+    if root.is_none() && cmd_log_path.0.is_none() {
         init_stderr_logger(level);
         return;
     }
-    let root = root.unwrap();
+    let root = root.unwrap_or("");
     let cmd_log_path = cmd_log_path.0.as_ref().cloned().unwrap_or("".to_string());
 
     let filename = if root.is_empty() || root == "/" {
         "root".to_string()
     } else {
         root.trim_start_matches('/')
-            .split(|c| c == '/' || c == '\\' || c == ':')
+            .split(['/', '\\', ':'])
             .filter(|s| !s.is_empty())
             .collect::<Vec<_>>()
             .join("_")

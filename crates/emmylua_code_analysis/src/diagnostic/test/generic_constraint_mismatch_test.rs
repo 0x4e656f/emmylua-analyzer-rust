@@ -150,9 +150,9 @@ mod test {
             DiagnosticCode::GenericConstraintMismatch,
             r#"
                 ---@class ABC1
-                
+
                 ---@generic T: string
-                ---@param t `T` 
+                ---@param t `T`
                 ---@return T
                 local function test(t)
                 end
@@ -197,6 +197,142 @@ mod test {
 
                 local a --- @type string[]?
                 wrap(assert(a))
+        "#
+        ));
+    }
+
+    #[test]
+    fn test_union() {
+        let mut ws = VirtualWorkspace::new();
+        ws.def(
+            r#"
+            ---@class ab
+
+            ---@generic T
+            ---@param a `T`|T
+            ---@return T
+            function name(a)
+                return a
+            end
+        "#,
+        );
+        assert!(ws.check_code_for(
+            DiagnosticCode::GenericConstraintMismatch,
+            r#"
+            ---@type ab
+            local a
+
+            name(a)
+        "#
+        ));
+        assert!(ws.check_code_for(
+            DiagnosticCode::GenericConstraintMismatch,
+            r#"
+            name("ab")
+        "#
+        ));
+
+        assert!(!ws.check_code_for(
+            DiagnosticCode::GenericConstraintMismatch,
+            r#"
+            name("a")
+        "#
+        ));
+    }
+
+    #[test]
+    fn test_union_2() {
+        let mut ws = VirtualWorkspace::new();
+        ws.def(
+            r#"
+            ---@generic T: table
+            ---@param obj T
+            function add(obj)
+            end
+
+            ---@class GCNode
+        "#,
+        );
+        assert!(ws.check_code_for(
+            DiagnosticCode::GenericConstraintMismatch,
+            r#"
+            ---@generic T: table
+            ---@param obj T | string
+            ---@return T?
+            function bindGC(obj)
+                if type(obj) == "string" then
+                    ---@type GCNode
+                    obj = {}
+                end
+
+                return add(obj)
+            end
+        "#
+        ));
+    }
+
+    #[test]
+    fn test_union_3() {
+        let mut ws = VirtualWorkspace::new();
+        ws.def(
+            r#"
+            ---@generic T: table
+            ---@param obj T
+            function add(obj)
+            end
+
+
+        "#,
+        );
+        assert!(ws.check_code_for(
+            DiagnosticCode::GenericConstraintMismatch,
+            r#"
+
+            ---@class GCNode<T: table>
+            GCNode = {}
+
+            ---@param obj T
+            ---@return T?
+            function GCNode:bindGC(obj)
+                return add(obj)
+            end
+        "#
+        ));
+    }
+
+    #[test]
+    fn test_generic_keyof_param_scope() {
+        let mut ws = VirtualWorkspace::new();
+        ws.def(
+            r#"
+                ---@generic T, K extends keyof T
+                ---@param object T
+                ---@param key K
+                ---@return std.RawGet<T, K>
+                function pick(object, key)
+                end
+
+                ---@class Person
+                ---@field name string
+            "#,
+        );
+        assert!(!ws.check_code_for(
+            DiagnosticCode::GenericConstraintMismatch,
+            r#"
+            ---@type Person
+            local person
+
+            pick(person, "abc")
+        "#
+        ));
+
+        assert!(ws.check_code_for(
+            DiagnosticCode::GenericConstraintMismatch,
+            r#"
+            ---@type Person
+            local person
+
+            pick(person, "name")
         "#
         ));
     }

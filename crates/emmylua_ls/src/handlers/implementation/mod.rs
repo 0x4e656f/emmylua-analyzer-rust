@@ -5,8 +5,8 @@ use emmylua_code_analysis::{EmmyLuaAnalysis, FileId};
 use emmylua_parser::LuaAstNode;
 use implementation_searcher::search_implementations;
 use lsp_types::{
-    request::GotoImplementationParams, ClientCapabilities, GotoDefinitionResponse,
-    ImplementationProviderCapability, Position, ServerCapabilities,
+    ClientCapabilities, GotoDefinitionResponse, ImplementationProviderCapability, Position,
+    ServerCapabilities, request::GotoImplementationParams,
 };
 use rowan::TokenAtOffset;
 use tokio_util::sync::CancellationToken;
@@ -19,7 +19,7 @@ pub async fn on_implementation_handler(
     _: CancellationToken,
 ) -> Option<GotoDefinitionResponse> {
     let uri = params.text_document_position_params.text_document.uri;
-    let analysis = context.analysis.read().await;
+    let analysis = context.analysis().read().await;
     let file_id = analysis.get_file_id(&uri)?;
     let position = params.text_document_position_params.position;
 
@@ -31,7 +31,7 @@ pub fn implementation(
     file_id: FileId,
     position: Position,
 ) -> Option<GotoDefinitionResponse> {
-    let mut semantic_model = analysis.compilation.get_semantic_model(file_id)?;
+    let semantic_model = analysis.compilation.get_semantic_model(file_id)?;
 
     let root = semantic_model.get_root();
     let position_offset = {
@@ -49,8 +49,7 @@ pub fn implementation(
         TokenAtOffset::Between(token, _) => token,
     };
 
-    let implementations =
-        search_implementations(&mut semantic_model, &analysis.compilation, token)?;
+    let implementations = search_implementations(&semantic_model, &analysis.compilation, token)?;
 
     if implementations.is_empty() {
         return None;

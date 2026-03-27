@@ -1,30 +1,29 @@
 mod build_hover;
 mod find_origin;
-mod function_humanize;
+mod function;
 mod hover_builder;
-mod hover_humanize;
+mod humanize_type_decl;
+mod humanize_types;
 mod keyword_hover;
-mod std_hover;
 
+use super::RegisterCapabilities;
+use crate::context::ServerContextSnapshot;
+use crate::util::{find_ref_at, resolve_ref_single};
 pub use build_hover::build_hover_content_for_completion;
 use build_hover::build_semantic_info_hover;
-use emmylua_code_analysis::{EmmyLuaAnalysis, FileId};
-use emmylua_parser::LuaAstNode;
+use emmylua_code_analysis::{EmmyLuaAnalysis, FileId, WorkspaceId};
+use emmylua_parser::{LuaAstNode, LuaDocDescription, LuaTokenKind};
+use emmylua_parser_desc::parse_ref_target;
 pub use find_origin::{find_all_same_named_members, find_member_origin_owner};
 pub use hover_builder::HoverBuilder;
-pub use hover_humanize::infer_prefix_global_name;
+pub use humanize_types::infer_prefix_global_name;
 use keyword_hover::{hover_keyword, is_keyword};
 use lsp_types::{
     ClientCapabilities, Hover, HoverContents, HoverParams, HoverProviderCapability, MarkupContent,
     Position, ServerCapabilities,
 };
 use rowan::TokenAtOffset;
-pub use std_hover::{hover_std_description, is_std};
 use tokio_util::sync::CancellationToken;
-
-use crate::context::ServerContextSnapshot;
-
-use super::RegisterCapabilities;
 
 pub async fn on_hover(
     context: ServerContextSnapshot,
@@ -33,7 +32,7 @@ pub async fn on_hover(
 ) -> Option<Hover> {
     let uri = params.text_document_position_params.text_document.uri;
     let position = params.text_document_position_params.position;
-    let analysis = context.analysis.read().await;
+    let analysis = context.analysis().read().await;
     let file_id = analysis.get_file_id(&uri)?;
     hover(&analysis, file_id, position)
 }
@@ -56,26 +55,86 @@ pub fn hover(analysis: &EmmyLuaAnalysis, file_id: FileId, position: Position) ->
 
     let token = match root.syntax().token_at_offset(position_offset) {
         TokenAtOffset::Single(token) => token,
-        TokenAtOffset::Between(_, right) => right,
-        TokenAtOffset::None => {
-            return None;
+        TokenAtOffset::Between(left, right) => {
+            if matches!(
+                right.kind().into(),
+                LuaTokenKind::TkDot
+                    | LuaTokenKind::TkColon
+                    | LuaTokenKind::TkLeftBracket
+                    | LuaTokenKind::TkRightBracket
+            ) {
+                left
+            } else {
+                right
+            }
         }
+        TokenAtOffset::None => return None,
     };
     match token {
         keywords if is_keyword(keywords.clone()) => {
             let document = semantic_model.get_document();
-            return Some(Hover {
+            Some(Hover {
                 contents: HoverContents::Markup(MarkupContent {
                     kind: lsp_types::MarkupKind::Markdown,
                     value: hover_keyword(keywords.clone()),
                 }),
                 range: document.to_lsp_range(keywords.text_range()),
-            });
+            })
+        }
+        detail if detail.kind() == LuaTokenKind::TkDocDetail.into() => {
+            let parent = detail.parent()?;
+            let description = LuaDocDescription::cast(parent)?;
+            let document = semantic_model.get_document();
+
+            let path = find_ref_at(
+                semantic_model
+                    .get_module()
+                    .map(|m| m.workspace_id)
+                    .unwrap_or(WorkspaceId::MAIN),
+                semantic_model.get_emmyrc(),
+                document.get_text(),
+                description.clone(),
+                position_offset,
+            )?;
+
+            let db = analysis.compilation.get_db();
+            let semantic_info = resolve_ref_single(db, file_id, &path, &detail)?;
+
+            build_semantic_info_hover(
+                &analysis.compilation,
+                &semantic_model,
+                db,
+                &document,
+                detail,
+                semantic_info,
+                path.last()?.1,
+            )
+        }
+        doc_see if doc_see.kind() == LuaTokenKind::TkDocSeeContent.into() => {
+            let document = semantic_model.get_document();
+
+            let path =
+                parse_ref_target(document.get_text(), doc_see.text_range(), position_offset)?;
+
+            let db = analysis.compilation.get_db();
+            let semantic_info = resolve_ref_single(db, file_id, &path, &doc_see)?;
+
+            build_semantic_info_hover(
+                &analysis.compilation,
+                &semantic_model,
+                db,
+                &document,
+                doc_see,
+                semantic_info,
+                path.last()?.1,
+            )
         }
         _ => {
             let semantic_info = semantic_model.get_semantic_info(token.clone().into())?;
             let db = semantic_model.get_db();
             let document = semantic_model.get_document();
+            let range = token.text_range();
+
             build_semantic_info_hover(
                 &analysis.compilation,
                 &semantic_model,
@@ -83,6 +142,7 @@ pub fn hover(analysis: &EmmyLuaAnalysis, file_id: FileId, position: Position) ->
                 &document,
                 token,
                 semantic_info,
+                range,
             )
         }
     }

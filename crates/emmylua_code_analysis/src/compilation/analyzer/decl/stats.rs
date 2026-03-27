@@ -1,16 +1,17 @@
 use emmylua_parser::{
     LuaAssignStat, LuaAstNode, LuaAstToken, LuaExpr, LuaForRangeStat, LuaForStat, LuaFuncStat,
     LuaIndexExpr, LuaIndexKey, LuaLocalFuncStat, LuaLocalStat, LuaSyntaxId, LuaSyntaxKind,
-    LuaVarExpr,
+    LuaVarExpr, NumberResult,
 };
 
 use crate::{
-    compilation::analyzer::bind_type::bind_type,
-    db_index::{LocalAttribute, LuaDecl, LuaMember, LuaMemberKey},
     LuaDeclExtra, LuaMemberFeature, LuaMemberId, LuaSemanticDeclId, LuaSignatureId, LuaType,
+    LuaTypeCache,
+    compilation::analyzer::common::bind_type,
+    db_index::{LocalAttribute, LuaDecl, LuaMember, LuaMemberKey},
 };
 
-use super::{members::find_index_owner, DeclAnalyzer};
+use super::{DeclAnalyzer, members::find_index_owner};
 
 pub fn analyze_local_stat(analyzer: &mut DeclAnalyzer, stat: LuaLocalStat) -> Option<()> {
     let local_name_list = stat.get_local_name_list().collect::<Vec<_>>();
@@ -36,18 +37,14 @@ pub fn analyze_local_stat(analyzer: &mut DeclAnalyzer, stat: LuaLocalStat) -> Op
 
         let file_id = analyzer.get_file_id();
         let range = local_name.get_range();
-        let expr_id = if let Some(expr) = value_expr_list.get(index) {
-            Some(expr.get_syntax_id())
-        } else {
-            None
-        };
+        let expr_id = value_expr_list.get(index).map(|expr| expr.get_syntax_id());
 
         let decl = LuaDecl::new(
             &name,
             file_id,
             range,
             LuaDeclExtra::Local {
-                kind: local_name.syntax().kind().into(),
+                kind: local_name.syntax().kind(),
                 attrib,
             },
             expr_id,
@@ -61,20 +58,32 @@ pub fn analyze_local_stat(analyzer: &mut DeclAnalyzer, stat: LuaLocalStat) -> Op
 pub fn analyze_assign_stat(analyzer: &mut DeclAnalyzer, stat: LuaAssignStat) -> Option<()> {
     let (vars, value_exprs) = stat.get_var_and_expr_list();
     for (idx, var) in vars.iter().enumerate() {
-        let value_expr_id = if let Some(expr) = value_exprs.get(idx) {
-            Some(expr.get_syntax_id())
-        } else {
-            None
-        };
+        let value_expr_id = value_exprs.get(idx).map(|expr| expr.get_syntax_id());
 
         match &var {
-            LuaVarExpr::NameExpr(name) => {
-                let name_token = name.get_name_token()?;
+            LuaVarExpr::NameExpr(name_expr) => {
+                let name_token = name_expr.get_name_token()?;
                 let position = name_token.get_position();
                 let name = name_token.get_name_text();
                 let file_id = analyzer.get_file_id();
                 let range = name_token.get_range();
-                if let Some(decl) = analyzer.find_decl(&name, position) {
+                if name == "_" {
+                    let decl = LuaDecl::new(
+                        name,
+                        file_id,
+                        range,
+                        LuaDeclExtra::Local {
+                            kind: name_expr.syntax().kind(),
+                            attrib: Some(LocalAttribute::Const),
+                        },
+                        value_expr_id,
+                    );
+
+                    analyzer.add_decl(decl);
+                    continue;
+                }
+
+                if let Some(decl) = analyzer.find_decl(name, position) {
                     let decl_id = decl.get_id();
                     analyzer
                         .db
@@ -99,7 +108,13 @@ pub fn analyze_assign_stat(analyzer: &mut DeclAnalyzer, stat: LuaAssignStat) -> 
                 let key: LuaMemberKey = match index_key {
                     LuaIndexKey::Name(name) => LuaMemberKey::Name(name.get_name_text().into()),
                     LuaIndexKey::String(str) => LuaMemberKey::Name(str.get_value().into()),
-                    LuaIndexKey::Integer(i) => LuaMemberKey::Integer(i.get_int_value()),
+                    LuaIndexKey::Integer(i) => {
+                        if let NumberResult::Int(idx) = i.get_number_value() {
+                            LuaMemberKey::Integer(idx)
+                        } else {
+                            continue;
+                        }
+                    }
                     LuaIndexKey::Idx(idx) => LuaMemberKey::Integer(idx as i64),
                     LuaIndexKey::Expr(_) => {
                         continue;
@@ -119,7 +134,7 @@ pub fn analyze_assign_stat(analyzer: &mut DeclAnalyzer, stat: LuaAssignStat) -> 
 
                 analyzer.db.get_member_index_mut().add_member(owner, member);
                 if let LuaMemberKey::Name(name) = &key {
-                    analyze_maybe_global_index_expr(analyzer, index_expr, &name, value_expr_id);
+                    analyze_maybe_global_index_expr(analyzer, index_expr, name, value_expr_id);
                 }
             }
         }
@@ -141,9 +156,8 @@ fn analyze_maybe_global_index_expr(
         let name_token_text = name_token.get_name_text();
         if name_token_text == "_G" || name_token_text == "_ENV" {
             let position = index_expr.get_position();
-            let name = name_token.get_name_text();
             let range = index_expr.get_range();
-            if let Some(decl) = analyzer.find_decl(&name, position) {
+            if let Some(decl) = analyzer.find_decl(&index_name, position) {
                 let decl_id = decl.get_id();
                 analyzer
                     .db
@@ -178,7 +192,7 @@ pub fn analyze_for_stat(analyzer: &mut DeclAnalyzer, stat: LuaForStat) -> Option
         file_id,
         range,
         LuaDeclExtra::Local {
-            kind: it_var.syntax().kind().into(),
+            kind: it_var.syntax().kind(),
             attrib: Some(LocalAttribute::IterConst),
         },
         None,
@@ -188,7 +202,7 @@ pub fn analyze_for_stat(analyzer: &mut DeclAnalyzer, stat: LuaForStat) -> Option
     bind_type(
         analyzer.db,
         decl_id.into(),
-        crate::LuaTypeCache::DocType(LuaType::Integer),
+        LuaTypeCache::DocType(LuaType::Integer),
     );
 
     Some(())
@@ -206,7 +220,7 @@ pub fn analyze_for_range_stat(analyzer: &mut DeclAnalyzer, stat: LuaForRangeStat
             file_id,
             range,
             LuaDeclExtra::Local {
-                kind: var.syntax().kind().into(),
+                kind: var.syntax().kind(),
                 attrib: Some(LocalAttribute::IterConst),
             },
             None,
@@ -225,7 +239,7 @@ pub fn analyze_func_stat(analyzer: &mut DeclAnalyzer, stat: LuaFuncStat) -> Opti
             let position = name_token.get_position();
             let name = name_token.get_name_text();
             let range = name_token.get_range();
-            if analyzer.find_decl(&name, position).is_none() {
+            if analyzer.find_decl(name, position).is_none() || analyzer.is_meta {
                 let decl = LuaDecl::new(
                     name,
                     file_id,
@@ -247,7 +261,13 @@ pub fn analyze_func_stat(analyzer: &mut DeclAnalyzer, stat: LuaFuncStat) -> Opti
             let key: LuaMemberKey = match index_key {
                 LuaIndexKey::Name(name) => LuaMemberKey::Name(name.get_name_text().into()),
                 LuaIndexKey::String(str) => LuaMemberKey::Name(str.get_value().into()),
-                LuaIndexKey::Integer(i) => LuaMemberKey::Integer(i.get_int_value()),
+                LuaIndexKey::Integer(i) => {
+                    if let NumberResult::Int(idx) = i.get_number_value() {
+                        LuaMemberKey::Integer(idx)
+                    } else {
+                        return None;
+                    }
+                }
                 LuaIndexKey::Idx(idx) => LuaMemberKey::Integer(idx as i64),
                 LuaIndexKey::Expr(_) => {
                     return None;
@@ -270,7 +290,7 @@ pub fn analyze_func_stat(analyzer: &mut DeclAnalyzer, stat: LuaFuncStat) -> Opti
                 .add_member(owner_id, member);
 
             if let LuaMemberKey::Name(name) = &key {
-                analyze_maybe_global_index_expr(analyzer, &index_expr, &name, None);
+                analyze_maybe_global_index_expr(analyzer, &index_expr, name, None);
             }
             LuaSemanticDeclId::Member(member_id)
         }
@@ -300,7 +320,7 @@ pub fn analyze_local_func_stat(analyzer: &mut DeclAnalyzer, stat: LuaLocalFuncSt
         file_id,
         range,
         LuaDeclExtra::Local {
-            kind: local_name.syntax().kind().into(),
+            kind: local_name.syntax().kind(),
             attrib: None,
         },
         None,

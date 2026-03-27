@@ -42,12 +42,12 @@ mod test {
     fn test_3() {
         let mut ws = VirtualWorkspace::new();
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
                 ---@return any ...
                 ---@return integer offset
                 local function unpack() end
-                
+
                 ---@param a nil|integer|'l'|'L'
                 local function test(a) end
                 local len = unpack()

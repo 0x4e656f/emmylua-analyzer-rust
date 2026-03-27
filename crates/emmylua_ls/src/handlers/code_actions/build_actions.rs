@@ -6,12 +6,11 @@ use lsp_types::{
     NumberOrString, Range, WorkspaceEdit,
 };
 
-use crate::handlers::{
-    code_actions::actions::build_need_check_nil,
-    command::{make_disable_code_command, DisableAction},
+use super::actions::{
+    build_add_doc_tag, build_disable_file_changes, build_disable_next_line_changes,
+    build_need_check_nil, build_preferred_local_alias_fix,
 };
-
-use super::actions::{build_disable_file_changes, build_disable_next_line_changes};
+use crate::handlers::command::{DisableAction, make_disable_code_command};
 
 pub fn build_actions(
     semantic_model: &SemanticModel,
@@ -29,25 +28,25 @@ pub fn build_actions(
             continue;
         }
 
-        if let Some(code) = diagnostic.code {
-            if let NumberOrString::String(action_string) = code {
-                if let Some(diagnostic_code) = DiagnosticCode::from_str(&action_string).ok() {
-                    add_fix_code_action(
-                        &semantic_model,
-                        &mut actions,
-                        diagnostic_code,
-                        file_id,
-                        diagnostic.range,
-                    );
-                    add_disable_code_action(
-                        &semantic_model,
-                        &mut actions,
-                        diagnostic_code,
-                        file_id,
-                        diagnostic.range,
-                    );
-                }
-            }
+        if let Some(code) = diagnostic.code
+            && let NumberOrString::String(action_string) = code
+            && let Ok(diagnostic_code) = DiagnosticCode::from_str(&action_string)
+        {
+            add_fix_code_action(
+                semantic_model,
+                &mut actions,
+                diagnostic_code,
+                file_id,
+                diagnostic.range,
+                &diagnostic.data,
+            );
+            add_disable_code_action(
+                semantic_model,
+                &mut actions,
+                diagnostic_code,
+                file_id,
+                diagnostic.range,
+            );
         }
     }
 
@@ -65,9 +64,14 @@ fn add_fix_code_action(
     diagnostic_code: DiagnosticCode,
     file_id: FileId,
     range: Range,
+    data: &Option<serde_json::Value>,
 ) -> Option<()> {
     match diagnostic_code {
-        DiagnosticCode::NeedCheckNil => build_need_check_nil(semantic_model, actions, range),
+        DiagnosticCode::NeedCheckNil => build_need_check_nil(semantic_model, actions, range, data),
+        DiagnosticCode::UnknownDocTag => build_add_doc_tag(semantic_model, actions, range, data),
+        DiagnosticCode::PreferredLocalAlias => {
+            build_preferred_local_alias_fix(semantic_model, actions, range, data)
+        }
         _ => Some(()),
     }
 }
@@ -120,12 +124,12 @@ fn add_disable_code_action(
         .to_string(),
         kind: Some(CodeActionKind::QUICKFIX),
         command: Some(make_disable_code_command(
-            &t!(
+            t!(
                 "Disable all diagnostics in current project (%{name})",
                 name = diagnostic_code.get_name()
             )
-            .to_string(),
-            DisableAction::DisableProject,
+            .as_ref(),
+            DisableAction::Project,
             diagnostic_code,
             file_id,
             range,

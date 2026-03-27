@@ -9,6 +9,7 @@ mod module;
 mod operators;
 mod property;
 mod reference;
+mod schema;
 mod semantic_decl;
 mod signature;
 mod traits;
@@ -18,21 +19,21 @@ use std::sync::Arc;
 
 use crate::{Emmyrc, FileId, Vfs};
 pub use declaration::*;
-use dependency::LuaDependencyIndex;
+pub use dependency::LuaDependencyIndex;
 pub use diagnostic::{AnalyzeError, DiagnosticAction, DiagnosticActionKind, DiagnosticIndex};
 pub use flow::*;
-pub use global::GlobalId;
-use global::LuaGlobalIndex;
+pub use global::{GlobalId, LuaGlobalIndex};
 pub use member::*;
-use metatable::LuaMetatableIndex;
+pub use metatable::LuaMetatableIndex;
 pub use module::*;
 pub use operators::*;
 pub use property::*;
-pub use r#type::*;
 pub use reference::*;
+pub use schema::*;
 pub use semantic_decl::*;
 pub use signature::*;
 pub use traits::LuaIndex;
+pub use r#type::*;
 
 #[derive(Debug)]
 pub struct DbIndex {
@@ -50,10 +51,17 @@ pub struct DbIndex {
     file_dependencies_index: LuaDependencyIndex,
     metatable_index: LuaMetatableIndex,
     global_index: LuaGlobalIndex,
+    json_schema_index: JsonSchemaIndex,
     emmyrc: Arc<Emmyrc>,
 }
 
 #[allow(unused)]
+impl Default for DbIndex {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DbIndex {
     pub fn new() -> Self {
         Self {
@@ -71,6 +79,7 @@ impl DbIndex {
             file_dependencies_index: LuaDependencyIndex::new(),
             metatable_index: LuaMetatableIndex::new(),
             global_index: LuaGlobalIndex::new(),
+            json_schema_index: JsonSchemaIndex::new(),
             emmyrc: Arc::new(Emmyrc::default()),
         }
     }
@@ -193,6 +202,14 @@ impl DbIndex {
         &mut self.global_index
     }
 
+    pub fn get_json_schema_index(&self) -> &JsonSchemaIndex {
+        &self.json_schema_index
+    }
+
+    pub fn get_json_schema_index_mut(&mut self) -> &mut JsonSchemaIndex {
+        &mut self.json_schema_index
+    }
+
     pub fn update_config(&mut self, config: Arc<Emmyrc>) {
         self.vfs.update_config(config.clone());
         self.modules_index.update_config(config.clone());
@@ -219,6 +236,7 @@ impl LuaIndex for DbIndex {
         self.file_dependencies_index.remove(file_id);
         self.metatable_index.remove(file_id);
         self.global_index.remove(file_id);
+        self.json_schema_index.remove(file_id);
     }
 
     fn clear(&mut self) {
@@ -235,5 +253,6 @@ impl LuaIndex for DbIndex {
         self.file_dependencies_index.clear();
         self.metatable_index.clear();
         self.global_index.clear();
+        self.json_schema_index.clear();
     }
 }

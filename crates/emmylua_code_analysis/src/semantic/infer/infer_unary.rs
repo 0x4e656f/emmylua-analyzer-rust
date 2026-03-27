@@ -1,11 +1,11 @@
 use emmylua_parser::{LuaUnaryExpr, UnaryOperator};
 
 use crate::{
-    db_index::{DbIndex, LuaOperatorMetaMethod, LuaType},
     LuaInferCache,
+    db_index::{DbIndex, LuaOperatorMetaMethod, LuaType},
 };
 
-use super::{get_custom_type_operator, infer_expr, InferFailReason, InferResult};
+use super::{InferFailReason, InferResult, get_custom_type_operator, infer_expr};
 
 pub fn infer_unary_expr(
     db: &DbIndex,
@@ -35,7 +35,9 @@ fn infer_unary_custom_operator(
     let operators = get_custom_type_operator(db, inner.clone(), op);
     if let Some(operators) = operators {
         for operator in operators {
-            return operator.get_result(db);
+            if let Ok(res) = operator.get_result(db) {
+                return Ok(res);
+            }
         }
     }
 
@@ -56,8 +58,8 @@ fn infer_unary_expr_not(inner_type: LuaType) -> InferResult {
 fn infer_unary_expr_unm(db: &DbIndex, inner_type: LuaType) -> InferResult {
     match inner_type {
         LuaType::IntegerConst(i) => Ok(LuaType::IntegerConst(-i)),
-        LuaType::DocIntegerConst(i) => Ok(LuaType::DocIntegerConst((-i).into())),
-        LuaType::FloatConst(f) => Ok(LuaType::FloatConst((-f).into())),
+        LuaType::DocIntegerConst(i) => Ok(LuaType::DocIntegerConst(-i)),
+        LuaType::FloatConst(f) => Ok(LuaType::FloatConst(-f)),
         LuaType::Integer => Ok(LuaType::Integer),
         _ => infer_unary_custom_operator(db, &inner_type, LuaOperatorMetaMethod::Unm),
     }

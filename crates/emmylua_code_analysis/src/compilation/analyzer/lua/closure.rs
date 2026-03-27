@@ -1,18 +1,20 @@
+use std::ops::Deref;
+
 use emmylua_parser::{
     LuaAst, LuaAstNode, LuaCallArgList, LuaCallExpr, LuaClosureExpr, LuaFuncStat, LuaVarExpr,
 };
 
 use crate::{
+    DbIndex, InferFailReason, LuaInferCache, LuaType, SignatureReturnStatus, TypeOps, VariadicType,
     compilation::analyzer::unresolve::{
         UnResolveCallClosureParams, UnResolveClosureReturn, UnResolveParentAst,
         UnResolveParentClosureParams, UnResolveReturn,
     },
     db_index::{LuaDocReturnInfo, LuaSignatureId},
-    infer_expr, DbIndex, InferFailReason, LuaInferCache, LuaType, SignatureReturnStatus, TypeOps,
-    VariadicType,
+    infer_expr,
 };
 
-use super::{func_body::analyze_func_body_returns, LuaAnalyzer, LuaReturnPoint};
+use super::{LuaAnalyzer, LuaReturnPoint, func_body::analyze_func_body_returns};
 
 pub fn analyze_closure(analyzer: &mut LuaAnalyzer, closure: LuaClosureExpr) -> Option<()> {
     let signature_id = LuaSignatureId::from_closure(analyzer.file_id, &closure);
@@ -31,7 +33,7 @@ fn analyze_colon_define(
     let signature = analyzer
         .db
         .get_signature_index_mut()
-        .get_or_create(signature_id.clone());
+        .get_or_create(*signature_id);
 
     let func_stat = closure.get_parent::<LuaFuncStat>()?;
     let func_name = func_stat.get_func_name()?;
@@ -59,7 +61,7 @@ fn analyze_lambda_params(
 
             let unresolved = UnResolveCallClosureParams {
                 file_id: analyzer.file_id,
-                signature_id: signature_id.clone(),
+                signature_id: *signature_id,
                 call_expr,
                 param_idx: founded_idx,
             };
@@ -71,7 +73,7 @@ fn analyze_lambda_params(
         LuaAst::LuaFuncStat(func_stat) => {
             let unresolved = UnResolveParentClosureParams {
                 file_id: analyzer.file_id,
-                signature_id: signature_id.clone(),
+                signature_id: *signature_id,
                 parent_ast: UnResolveParentAst::LuaFuncStat(func_stat.clone()),
             };
 
@@ -82,7 +84,7 @@ fn analyze_lambda_params(
         LuaAst::LuaTableField(table_field) => {
             let unresolved = UnResolveParentClosureParams {
                 file_id: analyzer.file_id,
-                signature_id: signature_id.clone(),
+                signature_id: *signature_id,
                 parent_ast: UnResolveParentAst::LuaTableField(table_field.clone()),
             };
 
@@ -93,7 +95,7 @@ fn analyze_lambda_params(
         LuaAst::LuaAssignStat(assign_stat) => {
             let unresolved = UnResolveParentClosureParams {
                 file_id: analyzer.file_id,
-                signature_id: signature_id.clone(),
+                signature_id: *signature_id,
                 parent_ast: UnResolveParentAst::LuaAssignStat(assign_stat.clone()),
             };
 
@@ -112,17 +114,14 @@ fn analyze_return(
     signature_id: &LuaSignatureId,
     closure: &LuaClosureExpr,
 ) -> Option<()> {
-    let signature = analyzer.db.get_signature_index().get(&signature_id)?;
+    let signature = analyzer.db.get_signature_index().get(signature_id)?;
     if signature.resolve_return == SignatureReturnStatus::DocResolve {
         return None;
     }
 
     let parent = closure.get_parent::<LuaAst>()?;
-    match &parent {
-        LuaAst::LuaCallArgList(_) => {
-            analyze_lambda_returns(analyzer, signature_id, closure);
-        }
-        _ => {}
+    if let LuaAst::LuaCallArgList(_) = &parent {
+        analyze_lambda_returns(analyzer, signature_id, closure);
     };
 
     let block = match closure.get_block() {
@@ -131,7 +130,7 @@ fn analyze_return(
             let signature = analyzer
                 .db
                 .get_signature_index_mut()
-                .get_or_create(signature_id.clone());
+                .get_or_create(*signature_id);
             signature.resolve_return = SignatureReturnStatus::InferResolve;
             return Some(());
         }
@@ -139,8 +138,8 @@ fn analyze_return(
 
     let return_points = analyze_func_body_returns(block);
     let returns = match analyze_return_point(
-        &analyzer.db,
-        &mut analyzer
+        analyzer.db,
+        analyzer
             .context
             .infer_manager
             .get_infer_cache(analyzer.file_id),
@@ -152,12 +151,13 @@ fn analyze_return(
                 type_ref: LuaType::Unknown,
                 description: None,
                 name: None,
+                attributes: None,
             }]
         }
         Err(reason) => {
             let unresolve = UnResolveReturn {
                 file_id: analyzer.file_id,
-                signature_id: signature_id.clone(),
+                signature_id: *signature_id,
                 return_points,
             };
 
@@ -168,7 +168,7 @@ fn analyze_return(
     let signature = analyzer
         .db
         .get_signature_index_mut()
-        .get_or_create(signature_id.clone());
+        .get_or_create(*signature_id);
 
     signature.resolve_return = SignatureReturnStatus::InferResolve;
 
@@ -192,7 +192,7 @@ fn analyze_lambda_returns(
     let return_points = analyze_func_body_returns(block);
     let unresolved = UnResolveClosureReturn {
         file_id: analyzer.file_id,
-        signature_id: signature_id.clone(),
+        signature_id: *signature_id,
         call_expr,
         param_idx: founded_idx,
         return_points,
@@ -215,7 +215,7 @@ pub fn analyze_return_point(
         match point {
             LuaReturnPoint::Expr(expr) => {
                 let expr_type = infer_expr(db, cache, expr.clone())?;
-                return_type = TypeOps::Union.apply(db, &return_type, &expr_type);
+                return_type = union_return_expr(db, return_type, expr_type);
             }
             LuaReturnPoint::MuliExpr(exprs) => {
                 let mut multi_return = vec![];
@@ -224,10 +224,10 @@ pub fn analyze_return_point(
                     multi_return.push(expr_type);
                 }
                 let typ = LuaType::Variadic(VariadicType::Multi(multi_return).into());
-                return_type = TypeOps::Union.apply(db, &return_type, &typ);
+                return_type = union_return_expr(db, return_type, typ);
             }
             LuaReturnPoint::Nil => {
-                return_type = TypeOps::Union.apply(db, &return_type, &LuaType::Nil);
+                return_type = union_return_expr(db, return_type, LuaType::Nil);
             }
             _ => {}
         }
@@ -237,5 +237,95 @@ pub fn analyze_return_point(
         type_ref: return_type,
         description: None,
         name: None,
+        attributes: None,
     }])
+}
+
+fn union_return_expr(db: &DbIndex, left: LuaType, right: LuaType) -> LuaType {
+    if left == LuaType::Unknown {
+        return right;
+    }
+
+    match (&left, &right) {
+        (LuaType::Variadic(left_variadic), LuaType::Variadic(right_variadic)) => {
+            match (&left_variadic.deref(), &right_variadic.deref()) {
+                (VariadicType::Base(left_base), VariadicType::Base(right_base)) => {
+                    let union_base = TypeOps::Union.apply(db, left_base, right_base);
+                    LuaType::Variadic(VariadicType::Base(union_base).into())
+                }
+                (VariadicType::Multi(left_multi), VariadicType::Multi(right_multi)) => {
+                    let mut new_multi = vec![];
+                    let max_len = left_multi.len().max(right_multi.len());
+                    for i in 0..max_len {
+                        let left_type = left_multi.get(i).cloned().unwrap_or(LuaType::Nil);
+                        let right_type = right_multi.get(i).cloned().unwrap_or(LuaType::Nil);
+                        new_multi.push(TypeOps::Union.apply(db, &left_type, &right_type));
+                    }
+                    LuaType::Variadic(VariadicType::Multi(new_multi).into())
+                }
+                // difficult to merge the type, use let
+                _ => left.clone(),
+            }
+        }
+        (LuaType::Variadic(variadic), _) => {
+            let first_type = variadic.get_type(0).cloned().unwrap_or(LuaType::Unknown);
+            let first_union_type = TypeOps::Union.apply(db, &first_type, &right);
+
+            match variadic.deref() {
+                VariadicType::Base(base) => {
+                    let union_base = TypeOps::Union.apply(db, base, &LuaType::Nil);
+                    LuaType::Variadic(
+                        VariadicType::Multi(vec![
+                            first_union_type,
+                            LuaType::Variadic(VariadicType::Base(union_base).into()),
+                        ])
+                        .into(),
+                    )
+                }
+                VariadicType::Multi(multi) => {
+                    let mut new_multi = multi.clone();
+                    if !new_multi.is_empty() {
+                        new_multi[0] = first_union_type;
+                        for mult in new_multi.iter_mut().skip(1) {
+                            *mult = TypeOps::Union.apply(db, mult, &LuaType::Nil);
+                        }
+                    } else {
+                        new_multi.push(first_union_type);
+                    }
+
+                    LuaType::Variadic(VariadicType::Multi(new_multi).into())
+                }
+            }
+        }
+        (_, LuaType::Variadic(variadic)) => {
+            let first_type = variadic.get_type(0).cloned().unwrap_or(LuaType::Unknown);
+            let first_union_type = TypeOps::Union.apply(db, &left, &first_type);
+            match variadic.deref() {
+                VariadicType::Base(base) => {
+                    let union_base = TypeOps::Union.apply(db, base, &LuaType::Nil);
+                    LuaType::Variadic(
+                        VariadicType::Multi(vec![
+                            first_union_type,
+                            LuaType::Variadic(VariadicType::Base(union_base).into()),
+                        ])
+                        .into(),
+                    )
+                }
+                VariadicType::Multi(multi) => {
+                    let mut new_multi = multi.clone();
+                    if !new_multi.is_empty() {
+                        new_multi[0] = first_union_type;
+                        for mult in new_multi.iter_mut().skip(1) {
+                            *mult = TypeOps::Union.apply(db, mult, &LuaType::Nil);
+                        }
+                    } else {
+                        new_multi.push(first_union_type);
+                    }
+
+                    LuaType::Variadic(VariadicType::Multi(new_multi).into())
+                }
+            }
+        }
+        _ => TypeOps::Union.apply(db, &left, &right),
+    }
 }

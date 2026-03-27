@@ -42,12 +42,12 @@ mod test {
 
         ws.def(
             r#"
-        local a 
+        local a
         d = a and 1
         "#,
         );
         let left = ws.expr_ty("d");
-        assert_eq!(ws.humanize_type(left), "1?");
+        assert_eq!(ws.humanize_type(left), "nil");
     }
 
     #[test]

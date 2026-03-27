@@ -1,9 +1,9 @@
 use std::collections::HashSet;
 
-use emmylua_code_analysis::{DiagnosticCode, LuaTypeAttribute};
+use emmylua_code_analysis::{DiagnosticCode, LuaTypeFlag};
 use emmylua_parser::{
-    LuaAst, LuaAstNode, LuaClosureExpr, LuaComment, LuaDocAttribute, LuaSyntaxKind, LuaSyntaxToken,
-    LuaTokenKind,
+    LuaAst, LuaAstNode, LuaClosureExpr, LuaComment, LuaDocTag, LuaDocTypeFlag, LuaSyntaxKind,
+    LuaSyntaxToken, LuaTokenKind,
 };
 use lsp_types::CompletionItem;
 
@@ -29,14 +29,17 @@ pub fn add_completion(builder: &mut CompletionBuilder) -> Option<()> {
         DocCompletionExpected::DiagnosticCode => {
             add_tag_diagnostic_code_completion(builder);
         }
-        DocCompletionExpected::ClassAttr => {
-            add_tag_class_attr_completion(builder);
+        DocCompletionExpected::TypeFlag(node) => {
+            add_tag_type_flag_completion(builder, node);
         }
         DocCompletionExpected::Namespace => {
             add_tag_namespace_completion(builder);
         }
         DocCompletionExpected::Using => {
             add_tag_using_completion(builder);
+        }
+        DocCompletionExpected::Export => {
+            add_tag_export_completion(builder);
         }
     }
 
@@ -74,13 +77,16 @@ fn get_doc_completion_expected(trigger_token: &LuaSyntaxToken) -> Option<DocComp
                 }
                 LuaTokenKind::TkTagNamespace => Some(DocCompletionExpected::Namespace),
                 LuaTokenKind::TkTagUsing => Some(DocCompletionExpected::Using),
+                LuaTokenKind::TkTagExport => Some(DocCompletionExpected::Export),
                 LuaTokenKind::TkComma => {
                     let parent = left_token.parent()?;
                     match parent.kind().into() {
                         LuaSyntaxKind::DocDiagnosticCodeList => {
                             Some(DocCompletionExpected::DiagnosticCode)
                         }
-                        LuaSyntaxKind::DocAttribute => Some(DocCompletionExpected::ClassAttr),
+                        LuaSyntaxKind::DocTypeFlag => Some(DocCompletionExpected::TypeFlag(
+                            LuaDocTypeFlag::cast(parent.clone())?,
+                        )),
                         _ => None,
                     }
                 }
@@ -98,30 +104,35 @@ fn get_doc_completion_expected(trigger_token: &LuaSyntaxToken) -> Option<DocComp
             let parent = trigger_token.parent()?;
             match parent.kind().into() {
                 LuaSyntaxKind::DocDiagnosticCodeList => Some(DocCompletionExpected::DiagnosticCode),
-                LuaSyntaxKind::DocAttribute => Some(DocCompletionExpected::ClassAttr),
+                LuaSyntaxKind::DocTypeFlag => Some(DocCompletionExpected::TypeFlag(
+                    LuaDocTypeFlag::cast(parent.clone())?,
+                )),
                 _ => None,
             }
         }
         LuaTokenKind::TkLeftParen => {
             let parent = trigger_token.parent()?;
             match parent.kind().into() {
-                LuaSyntaxKind::DocAttribute => Some(DocCompletionExpected::ClassAttr),
+                LuaSyntaxKind::DocTypeFlag => Some(DocCompletionExpected::TypeFlag(
+                    LuaDocTypeFlag::cast(parent.clone())?,
+                )),
                 _ => None,
             }
         }
-        _ => return None,
+        _ => None,
     }
 }
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 enum DocCompletionExpected {
     ParamName,
     Cast,
     DiagnosticAction,
     DiagnosticCode,
-    ClassAttr,
+    TypeFlag(LuaDocTypeFlag),
     Namespace,
     Using,
+    Export,
 }
 
 fn add_tag_param_name_completion(builder: &mut CompletionBuilder) -> Option<()> {
@@ -166,7 +177,7 @@ fn add_tag_cast_name_completion(builder: &mut CompletionBuilder) -> Option<()> {
                 .semantic_model
                 .get_db()
                 .get_decl_index()
-                .get_decl(&decl_id)?;
+                .get_decl(decl_id)?;
 
             decl.get_name().to_string()
         };
@@ -187,7 +198,7 @@ fn add_tag_cast_name_completion(builder: &mut CompletionBuilder) -> Option<()> {
 }
 
 fn add_tag_diagnostic_action_completion(builder: &mut CompletionBuilder) {
-    let actions = vec!["disable", "disable-next-line", "disable-line", "enable"];
+    let actions = ["disable", "disable-next-line", "disable-line", "enable"];
     for (sorted_index, action) in actions.iter().enumerate() {
         let completion_item = CompletionItem {
             label: action.to_string(),
@@ -214,45 +225,37 @@ fn add_tag_diagnostic_code_completion(builder: &mut CompletionBuilder) {
     }
 }
 
-fn add_tag_class_attr_completion(builder: &mut CompletionBuilder) {
-    let attributes = [
-        (LuaTypeAttribute::Partial, "partial"),
-        (LuaTypeAttribute::Key, "key"),
-        (LuaTypeAttribute::Constructor, "constructor"),
-        (LuaTypeAttribute::Exact, "exact"),
-        (LuaTypeAttribute::Meta, "meta"),
-    ];
+fn add_tag_type_flag_completion(
+    builder: &mut CompletionBuilder,
+    node: LuaDocTypeFlag,
+) -> Option<()> {
+    let mut flags = vec![(LuaTypeFlag::Partial, "partial")];
 
-    // 已存在的属性
-    let mut existing_attrs = HashSet::new();
-    match builder.trigger_token.kind().into() {
-        LuaTokenKind::TkLeftParen | LuaTokenKind::TkComma => {
-            let parent = builder.trigger_token.parent().unwrap();
-            let attr = LuaDocAttribute::cast(parent).unwrap();
-            for token in attr.get_attrib_tokens() {
-                let name_text = token.get_name_text().to_string();
-                existing_attrs.insert(name_text);
-            }
+    match LuaDocTag::cast(node.syntax().parent()?)? {
+        LuaDocTag::Alias(_) => {
+            flags.push((LuaTypeFlag::Private, "private"));
         }
-        LuaTokenKind::TkWhitespace => {
-            let left_token = builder.trigger_token.prev_token().unwrap();
-            match left_token.kind().into() {
-                LuaTokenKind::TkComma => {
-                    let parent = left_token.parent().unwrap();
-                    let attr = LuaDocAttribute::cast(parent).unwrap();
-                    for token in attr.get_attrib_tokens() {
-                        let name_text = token.get_name_text().to_string();
-                        existing_attrs.insert(name_text);
-                    }
-                }
-                _ => {}
-            }
+        LuaDocTag::Class(_) => {
+            flags.push((LuaTypeFlag::Exact, "exact"));
+            flags.push((LuaTypeFlag::Constructor, "constructor"));
+            flags.push((LuaTypeFlag::Private, "private"));
+        }
+        LuaDocTag::Enum(_) => {
+            flags.insert(0, (LuaTypeFlag::Key, "key"));
+            flags.push((LuaTypeFlag::Exact, "exact"));
+            flags.push((LuaTypeFlag::Private, "private"));
         }
         _ => {}
     }
+    // 已存在的属性
+    let mut existing_flags = HashSet::new();
+    for token in node.get_attrib_tokens() {
+        let name_text = token.get_name_text().to_string();
+        existing_flags.insert(name_text);
+    }
 
-    for (_, name) in attributes.iter() {
-        if existing_attrs.contains(*name) {
+    for (_, name) in flags.iter() {
+        if existing_flags.contains(*name) {
             continue;
         }
         let completion_item = CompletionItem {
@@ -262,6 +265,8 @@ fn add_tag_class_attr_completion(builder: &mut CompletionBuilder) {
         };
         builder.add_completion_item(completion_item);
     }
+
+    Some(())
 }
 
 fn add_tag_namespace_completion(builder: &mut CompletionBuilder) {
@@ -300,7 +305,20 @@ fn add_tag_using_completion(builder: &mut CompletionBuilder) {
             label: format!("using {}", namespace),
             kind: Some(lsp_types::CompletionItemKind::MODULE),
             sort_text: Some(format!("{:03}", sorted_index)),
-            insert_text: Some(format!("{}", namespace)),
+            insert_text: Some(namespace.to_string()),
+            ..Default::default()
+        };
+        builder.add_completion_item(completion_item);
+    }
+}
+
+fn add_tag_export_completion(builder: &mut CompletionBuilder) {
+    let key = ["namespace", "global"];
+    for (sorted_index, key) in key.iter().enumerate() {
+        let completion_item = CompletionItem {
+            label: key.to_string(),
+            kind: Some(lsp_types::CompletionItemKind::ENUM_MEMBER),
+            sort_text: Some(format!("{:03}", sorted_index)),
             ..Default::default()
         };
         builder.add_completion_item(completion_item);

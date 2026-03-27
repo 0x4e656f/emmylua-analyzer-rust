@@ -1,14 +1,14 @@
 use emmylua_parser::{
     LuaAst, LuaAstNode, LuaAstToken, LuaCallExpr, LuaClosureExpr, LuaDocTagCast, LuaExpr,
-    LuaIndexExpr, LuaIndexKey, LuaLiteralExpr, LuaLiteralToken, LuaNameExpr, LuaTableExpr,
-    LuaVarExpr,
+    LuaFuncStat, LuaIndexExpr, LuaIndexKey, LuaLiteralExpr, LuaLiteralToken, LuaNameExpr,
+    LuaTableExpr, LuaVarExpr, NumberResult,
 };
 
 use crate::{
-    compilation::analyzer::unresolve::UnResolveTableField,
-    db_index::{LuaDecl, LuaMember, LuaMemberKey, LuaMemberOwner},
     FileId, InFiled, InferFailReason, LuaDeclExtra, LuaDeclId, LuaMemberFeature, LuaMemberId,
     LuaSignatureId,
+    compilation::analyzer::unresolve::UnResolveTableField,
+    db_index::{LuaDecl, LuaMember, LuaMemberKey, LuaMemberOwner},
 };
 
 use super::DeclAnalyzer;
@@ -22,7 +22,7 @@ pub fn analyze_name_expr(analyzer: &mut DeclAnalyzer, expr: LuaNameExpr) -> Opti
     let decl_id = LuaDeclId::new(file_id, position);
     let (decl_id, is_local) = if analyzer.decl.get_decl(&decl_id).is_some() {
         (Some(decl_id), false)
-    } else if let Some(decl) = analyzer.find_decl(&name, position) {
+    } else if let Some(decl) = analyzer.find_decl(name, position) {
         if decl.is_local() {
             // reference local variable
             (Some(decl.get_id()), true)
@@ -58,8 +58,8 @@ pub fn analyze_index_expr(analyzer: &mut DeclAnalyzer, index_expr: LuaIndexExpr)
     let key = match index_key {
         LuaIndexKey::Name(name) => LuaMemberKey::Name(name.get_name_text().to_string().into()),
         LuaIndexKey::Integer(int) => {
-            if int.is_int() {
-                LuaMemberKey::Integer(int.get_int_value())
+            if let NumberResult::Int(i) = int.get_number_value() {
+                LuaMemberKey::Integer(i)
             } else {
                 return None;
             }
@@ -100,6 +100,8 @@ pub fn analyze_closure_expr(analyzer: &mut DeclAnalyzer, expr: LuaClosureExpr) -
     let signature_id = LuaSignatureId::from_closure(analyzer.get_file_id(), &expr);
     let file_id = analyzer.get_file_id();
     let member_id = get_closure_member_id(&expr, file_id);
+    try_add_self_param(analyzer, &expr);
+
     for (idx, param) in params.get_params().enumerate() {
         let name = param.get_name_token().map_or_else(
             || {
@@ -130,6 +132,32 @@ pub fn analyze_closure_expr(analyzer: &mut DeclAnalyzer, expr: LuaClosureExpr) -
 
     analyze_closure_params(analyzer, &signature_id, &expr);
 
+    Some(())
+}
+
+fn try_add_self_param(analyzer: &mut DeclAnalyzer, closure: &LuaClosureExpr) -> Option<()> {
+    let func_stat = closure.get_parent::<LuaFuncStat>()?;
+    let func_name = func_stat.get_func_name()?;
+    let LuaVarExpr::IndexExpr(index_expr) = func_name else {
+        return Some(());
+    };
+
+    let index_token = index_expr.get_index_token()?;
+    if !index_token.is_colon() {
+        return Some(());
+    }
+
+    let self_param = LuaDecl::new(
+        "self",
+        analyzer.get_file_id(),
+        index_token.get_range(),
+        LuaDeclExtra::ImplicitSelf {
+            kind: index_token.syntax().kind(),
+        },
+        None,
+    );
+
+    analyzer.add_decl(self_param);
     Some(())
 }
 
@@ -169,9 +197,14 @@ fn analyze_closure_params(
     let signature = analyzer
         .db
         .get_signature_index_mut()
-        .get_or_create(signature_id.clone());
+        .get_or_create(*signature_id);
     let params = closure.get_params_list()?.get_params();
+    let mut is_vararg = false;
     for param in params {
+        if param.is_dots() {
+            is_vararg = true;
+        }
+
         let name = if let Some(name_token) = param.get_name_token() {
             name_token.get_name_text().to_string()
         } else if param.is_dots() {
@@ -182,6 +215,8 @@ fn analyze_closure_params(
 
         signature.params.push(name);
     }
+
+    signature.is_vararg = is_vararg;
 
     Some(())
 }
@@ -204,7 +239,13 @@ pub fn analyze_table_expr(analyzer: &mut DeclAnalyzer, table_expr: LuaTableExpr)
                 let key: LuaMemberKey = match field_key {
                     LuaIndexKey::Name(name) => LuaMemberKey::Name(name.get_name_text().into()),
                     LuaIndexKey::String(str) => LuaMemberKey::Name(str.get_value().into()),
-                    LuaIndexKey::Integer(i) => LuaMemberKey::Integer(i.get_int_value()),
+                    LuaIndexKey::Integer(i) => {
+                        if let NumberResult::Int(idx) = i.get_number_value() {
+                            LuaMemberKey::Integer(idx)
+                        } else {
+                            continue;
+                        }
+                    }
                     LuaIndexKey::Idx(idx) => LuaMemberKey::Integer(idx as i64),
                     LuaIndexKey::Expr(field_expr) => {
                         let unresolve_member = UnResolveTableField {
@@ -278,7 +319,7 @@ pub fn analyze_literal_expr(analyzer: &mut DeclAnalyzer, expr: LuaLiteralExpr) -
                 .map(|_| decl_id)
                 .or_else(|| {
                     analyzer
-                        .find_decl(&dots_token.get_text(), position)
+                        .find_decl(dots_token.get_text(), position)
                         .and_then(|decl| decl.is_local().then(|| decl.get_id()))
                 });
 
@@ -298,17 +339,17 @@ pub fn analyze_literal_expr(analyzer: &mut DeclAnalyzer, expr: LuaLiteralExpr) -
 pub fn analyze_call_expr(analyzer: &mut DeclAnalyzer, expr: LuaCallExpr) -> Option<()> {
     if expr.is_require() {
         let args = expr.get_args_list()?;
-        if let Some(LuaExpr::LiteralExpr(literal_expr)) = args.get_args().next() {
-            if let Some(LuaLiteralToken::String(string_token)) = literal_expr.get_literal() {
-                let module_path = string_token.get_value();
-                let file_id = analyzer.get_file_id();
-                let module_info = analyzer.db.get_module_index().find_module(&module_path)?;
-                let module_file_id = module_info.file_id;
-                analyzer
-                    .db
-                    .get_file_dependencies_index_mut()
-                    .add_required_file(file_id, module_file_id);
-            }
+        if let Some(LuaExpr::LiteralExpr(literal_expr)) = args.get_args().next()
+            && let Some(LuaLiteralToken::String(string_token)) = literal_expr.get_literal()
+        {
+            let module_path = string_token.get_value();
+            let file_id = analyzer.get_file_id();
+            let module_info = analyzer.db.get_module_index().find_module(&module_path)?;
+            let module_file_id = module_info.file_id;
+            analyzer
+                .db
+                .get_file_dependencies_index_mut()
+                .add_required_file(file_id, module_file_id);
         }
     }
 

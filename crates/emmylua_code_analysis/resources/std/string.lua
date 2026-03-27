@@ -147,6 +147,13 @@ function string.format(fmt, ...) end
 ---@return fun():string?...
 function string.gmatch(s, pattern) end
 
+---@version > 5.4
+---@param s string
+---@param pattern string
+---@param init? integer
+---@return fun():string?...
+function string.gmatch(s, pattern, init) end
+
 ---
 --- Returns a copy of `s` in which all (or the first `n`, if given)
 --- occurrences of the `pattern` have been replaced by a replacement string
@@ -226,16 +233,18 @@ function string.lower(s) end
 function string.match(s, pattern, init) end
 
 ---@version >5.3
+---
 --- Returns a binary string containing the values `v1`, `v2`, etc. packed (that
 --- is, serialized in binary form) according to the format string `fmt`.
 ---@param fmt string
----@param v1 string
----@param v2? string
----@param ... string
+---@param v1 string|number|integer
+---@param v2? string|number|integer
+---@param ... string|number|integer
 ---@return string
 function string.pack(fmt, v1, v2, ...) end
 
 ---@version >5.3
+---
 --- Returns the size of a string resulting from `string.pack` with the given
 --- format. The format string cannot have the variable-length options '`s`' or
 --- '`z`'
@@ -283,6 +292,7 @@ function string.reverse(s) end
 function string.sub(s, i, j) end
 
 ---@version >5.3
+---
 --- Returns the values packed in string `s` according to the format string
 --- `fmt`. An optional `pos` marks where to start reading in `s` (default is 1).
 --- After the read values, this function also returns the index of the first

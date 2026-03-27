@@ -4,6 +4,7 @@ mod members;
 mod stats;
 
 use crate::{
+    compilation::analyzer::AnalysisPipeline,
     db_index::{DbIndex, LuaScopeKind},
     profile::Profile,
 };
@@ -13,25 +14,29 @@ use emmylua_parser::{LuaAst, LuaAstNode, LuaChunk, LuaFuncStat, LuaSyntaxKind, L
 use rowan::{TextRange, TextSize, WalkEvent};
 
 use crate::{
-    db_index::{LuaDecl, LuaDeclId, LuaDeclarationTree, LuaScopeId},
     FileId,
+    db_index::{LuaDecl, LuaDeclId, LuaDeclarationTree, LuaScopeId},
 };
 
-pub(crate) fn analyze(db: &mut DbIndex, context: &mut AnalyzeContext) {
-    let _p = Profile::cond_new("decl analyze", context.tree_list.len() > 1);
-    let tree_list = context.tree_list.clone();
-    for in_filed_tree in tree_list.iter() {
-        db.get_reference_index_mut()
-            .create_local_reference(in_filed_tree.file_id);
-        let mut analyzer = DeclAnalyzer::new(
-            db,
-            in_filed_tree.file_id,
-            in_filed_tree.value.clone(),
-            context,
-        );
-        analyzer.analyze();
-        let decl_tree = analyzer.get_decl_tree();
-        db.get_decl_index_mut().add_decl_tree(decl_tree);
+pub struct DeclAnalysisPipeline;
+
+impl AnalysisPipeline for DeclAnalysisPipeline {
+    fn analyze(db: &mut DbIndex, context: &mut AnalyzeContext) {
+        let _p = Profile::cond_new("decl analyze", context.tree_list.len() > 1);
+        let tree_list = context.tree_list.clone();
+        for in_filed_tree in tree_list.iter() {
+            db.get_reference_index_mut()
+                .create_local_reference(in_filed_tree.file_id);
+            let mut analyzer = DeclAnalyzer::new(
+                db,
+                in_filed_tree.file_id,
+                in_filed_tree.value.clone(),
+                context,
+            );
+            analyzer.analyze();
+            let decl_tree = analyzer.get_decl_tree();
+            db.get_decl_index_mut().add_decl_tree(decl_tree);
+        }
     }
 }
 
@@ -102,6 +107,9 @@ fn walk_node_enter(analyzer: &mut DeclAnalyzer, node: LuaAst) {
         LuaAst::LuaDocTagAlias(doc_tag) => {
             docs::analyze_doc_tag_alias(analyzer, doc_tag);
         }
+        LuaAst::LuaDocTagAttribute(doc_tag) => {
+            docs::analyze_doc_tag_attribute(analyzer, doc_tag);
+        }
         LuaAst::LuaDocTagNamespace(doc_tag) => {
             docs::analyze_doc_tag_namespace(analyzer, doc_tag);
         }
@@ -122,19 +130,19 @@ fn walk_node_leave(analyzer: &mut DeclAnalyzer, node: LuaAst) {
 }
 
 fn is_scope_owner(node: &LuaAst) -> bool {
-    match node.syntax().kind().into() {
+    matches!(
+        node.syntax().kind().into(),
         LuaSyntaxKind::Chunk
-        | LuaSyntaxKind::Block
-        | LuaSyntaxKind::ClosureExpr
-        | LuaSyntaxKind::RepeatStat
-        | LuaSyntaxKind::ForRangeStat
-        | LuaSyntaxKind::ForStat
-        | LuaSyntaxKind::LocalStat
-        | LuaSyntaxKind::FuncStat
-        | LuaSyntaxKind::LocalFuncStat
-        | LuaSyntaxKind::AssignStat => true,
-        _ => false,
-    }
+            | LuaSyntaxKind::Block
+            | LuaSyntaxKind::ClosureExpr
+            | LuaSyntaxKind::RepeatStat
+            | LuaSyntaxKind::ForRangeStat
+            | LuaSyntaxKind::ForStat
+            | LuaSyntaxKind::LocalStat
+            | LuaSyntaxKind::FuncStat
+            | LuaSyntaxKind::LocalFuncStat
+            | LuaSyntaxKind::AssignStat
+    )
 }
 
 #[derive(Debug)]

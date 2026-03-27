@@ -1,12 +1,12 @@
-use emmylua_code_analysis::{humanize_type, DbIndex, LuaType, RenderLevel};
+use emmylua_code_analysis::{DbIndex, LuaType, RenderLevel, humanize_type};
 
-pub fn render_typ(db: &DbIndex, typ: &LuaType) -> String {
+pub fn render_typ(db: &DbIndex, typ: &LuaType, level: RenderLevel) -> String {
     match typ {
         LuaType::IntegerConst(_) => "integer".to_string(),
         LuaType::FloatConst(_) => "number".to_string(),
         LuaType::StringConst(_) => "string".to_string(),
         LuaType::BooleanConst(_) => "boolean".to_string(),
-        _ => humanize_type(db, typ, RenderLevel::Simple),
+        _ => humanize_type(db, typ, level),
     }
 }
 
@@ -17,6 +17,7 @@ pub fn render_const(typ: &LuaType) -> Option<String> {
         LuaType::StringConst(s) | LuaType::DocStringConst(s) => {
             Some(format!("{:?}", s.to_string()))
         }
+        LuaType::BooleanConst(b) => Some(b.to_string()),
         _ => None,
     }
 }

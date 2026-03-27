@@ -1,4 +1,5 @@
 mod lua_language_level;
+mod lua_non_std_symbol;
 mod lua_operator_kind;
 mod lua_syntax_kind;
 mod lua_token_kind;
@@ -7,11 +8,12 @@ mod lua_version;
 mod lua_visibility_kind;
 
 pub use lua_language_level::LuaLanguageLevel;
-pub use lua_operator_kind::{BinaryOperator, UnaryOperator, UNARY_PRIORITY};
+pub use lua_non_std_symbol::{LuaNonStdSymbol, LuaNonStdSymbolSet};
+pub use lua_operator_kind::{BinaryOperator, UNARY_PRIORITY, UnaryOperator};
 pub use lua_syntax_kind::LuaSyntaxKind;
 pub use lua_token_kind::LuaTokenKind;
 pub use lua_type_operator_kind::{
-    LuaTypeBinaryOperator, LuaTypeTernaryOperator, LuaTypeUnaryOperator,
+    LuaTypeBinaryOperator, LuaTypeTernaryOperator, LuaTypeUnaryOperator, UNARY_TYPE_PRIORITY,
 };
 pub use lua_version::{LuaVersionCondition, LuaVersionNumber};
 pub use lua_visibility_kind::VisibilityKind;
@@ -62,6 +64,20 @@ impl LuaKind {
         matches!(self, LuaKind::Token(_))
     }
 
+    pub fn to_syntax(self) -> LuaSyntaxKind {
+        match self {
+            LuaKind::Syntax(kind) => kind,
+            LuaKind::Token(_) => LuaSyntaxKind::None,
+        }
+    }
+
+    pub fn to_token(self) -> LuaTokenKind {
+        match self {
+            LuaKind::Token(kind) => kind,
+            LuaKind::Syntax(_) => LuaTokenKind::None,
+        }
+    }
+
     pub fn get_raw(self) -> u16 {
         match self {
             LuaKind::Syntax(kind) => kind as u16 | 0x8000,
@@ -71,9 +87,9 @@ impl LuaKind {
 
     pub fn from_raw(raw: u16) -> LuaKind {
         if raw & 0x8000 != 0 {
-            LuaKind::Syntax(unsafe { std::mem::transmute(raw & 0x7FFF) })
+            LuaKind::Syntax(unsafe { std::mem::transmute::<u16, LuaSyntaxKind>(raw & 0x7FFF) })
         } else {
-            LuaKind::Token(unsafe { std::mem::transmute(raw) })
+            LuaKind::Token(unsafe { std::mem::transmute::<u16, LuaTokenKind>(raw) })
         }
     }
 }

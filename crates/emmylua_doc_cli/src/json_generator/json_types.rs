@@ -1,3 +1,4 @@
+use emmylua_code_analysis::Emmyrc;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -6,6 +7,7 @@ pub struct Index {
     pub modules: Vec<Module>,
     pub types: Vec<Type>,
     pub globals: Vec<Global>,
+    pub config: Emmyrc,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -40,7 +42,10 @@ pub struct Module {
     #[serde(flatten)]
     pub property: Property,
     pub file: Option<PathBuf>,
+    pub typ: Option<String>,
     pub members: Vec<Member>,
+    pub namespace: Option<String>,
+    pub using: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -69,6 +74,7 @@ pub struct Enum {
     pub property: Property,
     pub loc: Vec<Loc>,
     pub typ: Option<String>,
+    pub generics: Vec<TypeVar>,
     pub members: Vec<Member>,
 }
 
@@ -79,6 +85,7 @@ pub struct Alias {
     pub property: Property,
     pub loc: Vec<Loc>,
     pub typ: Option<String>,
+    pub generics: Vec<TypeVar>,
     pub members: Vec<Member>,
 }
 
@@ -126,10 +133,15 @@ pub struct Field {
 pub struct Property {
     pub description: Option<String>,
     pub visibility: Option<String>,
-    pub see: Option<String>,
     pub deprecated: bool,
     pub deprecation_reason: Option<String>,
-    pub other: Option<String>,
+    pub tag_content: Option<Vec<TagNameContent>>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct TagNameContent {
+    pub tag_name: String,
+    pub content: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]

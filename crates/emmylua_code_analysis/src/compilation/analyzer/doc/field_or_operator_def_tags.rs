@@ -2,20 +2,20 @@ use std::sync::Arc;
 
 use emmylua_parser::{
     LuaAstNode, LuaAstToken, LuaDocDescriptionOwner, LuaDocFieldKey, LuaDocTagField,
-    LuaDocTagOperator, LuaDocType, VisibilityKind,
+    LuaDocTagOperator, LuaDocType, NumberResult, VisibilityKind,
 };
 
 use crate::{
+    AnalyzeError, AsyncState, DiagnosticCode, LuaFunctionType, LuaMemberFeature, LuaMemberId,
+    LuaSignatureId, LuaTypeCache, OperatorFunction, TypeOps,
     compilation::analyzer::doc::preprocess_description,
     db_index::{
         LuaMember, LuaMemberKey, LuaMemberOwner, LuaOperator, LuaOperatorMetaMethod,
         LuaSemanticDeclId, LuaType,
     },
-    AnalyzeError, DiagnosticCode, LuaFunctionType, LuaMemberFeature, LuaMemberId, LuaSignatureId,
-    LuaTypeCache, OperatorFunction, TypeOps,
 };
 
-use super::{infer_type::infer_type, DocAnalyzer};
+use super::{DocAnalyzer, infer_type::infer_type};
 
 pub fn analyze_field(analyzer: &mut DocAnalyzer, tag: LuaDocTagField) -> Option<()> {
     let current_type_id = match &analyzer.current_type_id {
@@ -35,11 +35,9 @@ pub fn analyze_field(analyzer: &mut DocAnalyzer, tag: LuaDocTagField) -> Option<
 
     let owner_id = LuaMemberOwner::Type(current_type_id.clone());
     let visibility_kind = if let Some(visibility_token) = tag.get_visibility_token() {
-        Some(visibility_token.get_visibility())
-    } else if let Some(visibility) = get_visibility_from_field_attrib(&tag) {
-        Some(visibility)
+        visibility_token.get_visibility()
     } else {
-        None
+        get_visibility_from_field_attrib(&tag)
     };
 
     let member_id = LuaMemberId::new(tag.get_syntax_id(), analyzer.file_id);
@@ -49,7 +47,7 @@ pub fn analyze_field(analyzer: &mut DocAnalyzer, tag: LuaDocTagField) -> Option<
     let (mut field_type, property_owner) = match &type_node {
         LuaDocType::Func(doc_func) => {
             let typ = infer_type(analyzer, type_node.clone());
-            let signature_id = LuaSignatureId::from_doc_func(analyzer.file_id, &doc_func);
+            let signature_id = LuaSignatureId::from_doc_func(analyzer.file_id, doc_func);
             (typ, LuaSemanticDeclId::Signature(signature_id))
         }
         _ => (
@@ -64,9 +62,9 @@ pub fn analyze_field(analyzer: &mut DocAnalyzer, tag: LuaDocTagField) -> Option<
     let mut description = String::new();
 
     for desc in tag.get_descriptions() {
-        let mut desc_text = desc.get_description_text().to_string();
+        let desc_text = desc.get_description_text();
         if !desc_text.is_empty() {
-            let text = preprocess_description(&mut desc_text, Some(&property_owner));
+            let text = preprocess_description(&desc_text, Some(&property_owner));
             if !description.is_empty() {
                 description.push_str("\n\n");
             }
@@ -81,7 +79,13 @@ pub fn analyze_field(analyzer: &mut DocAnalyzer, tag: LuaDocTagField) -> Option<
             LuaMemberKey::Name(name_token.get_name_text().to_string().into())
         }
         LuaDocFieldKey::String(string_token) => LuaMemberKey::Name(string_token.get_value().into()),
-        LuaDocFieldKey::Integer(int_token) => LuaMemberKey::Integer(int_token.get_int_value()),
+        LuaDocFieldKey::Integer(int_token) => {
+            if let NumberResult::Int(idx) = int_token.get_number_value() {
+                LuaMemberKey::Integer(idx)
+            } else {
+                return None;
+            }
+        }
         LuaDocFieldKey::Type(doc_type) => {
             let range = doc_type.get_range();
             let key_type_ref = infer_type(analyzer, doc_type);
@@ -95,6 +99,7 @@ pub fn analyze_field(analyzer: &mut DocAnalyzer, tag: LuaDocTagField) -> Option<
                 analyzer.file_id,
                 range,
                 OperatorFunction::Func(Arc::new(LuaFunctionType::new(
+                    AsyncState::None,
                     false,
                     false,
                     vec![
@@ -102,13 +107,13 @@ pub fn analyze_field(analyzer: &mut DocAnalyzer, tag: LuaDocTagField) -> Option<
                             "self".to_string(),
                             Some(LuaType::Ref(current_type_id.clone())),
                         ),
-                        ("key".to_string(), Some(key_type_ref)),
+                        ("key".to_string(), Some(key_type_ref.clone())),
                     ],
-                    field_type,
+                    field_type.clone(),
                 ))),
             );
             analyzer.db.get_operator_index_mut().add_operator(operator);
-            return Some(());
+            LuaMemberKey::ExprType(key_type_ref)
         }
     };
 
@@ -130,10 +135,10 @@ pub fn analyze_field(analyzer: &mut DocAnalyzer, tag: LuaDocTagField) -> Option<
         .get_member_index_mut()
         .add_member(owner_id, member);
 
-    analyzer.db.get_type_index_mut().bind_type(
-        member_id.clone().into(),
-        LuaTypeCache::DocType(field_type.clone()),
-    );
+    analyzer
+        .db
+        .get_type_index_mut()
+        .bind_type(member_id.into(), LuaTypeCache::DocType(field_type.clone()));
 
     if let Some(visibility_kind) = visibility_kind {
         analyzer.db.get_property_index_mut().add_visibility(
@@ -144,6 +149,9 @@ pub fn analyze_field(analyzer: &mut DocAnalyzer, tag: LuaDocTagField) -> Option<
     }
 
     if !description.is_empty() {
+        // 不需要传入`owner`, 当前`owner`的效果是判断是否为`signature`, 如果是则不移除`['#', '@']`首字符
+        // 但以`field`定义的必须移除首字符
+        let description = preprocess_description(&description, None);
         analyzer.db.get_property_index_mut().add_description(
             analyzer.file_id,
             property_owner.clone(),
@@ -159,19 +167,21 @@ pub fn analyze_operator(analyzer: &mut DocAnalyzer, tag: LuaDocTagOperator) -> O
     let name_token = tag.get_name_token()?;
     let op_kind = LuaOperatorMetaMethod::from_operator_name(name_token.get_name_text())?;
     let mut operands: Vec<(String, Option<LuaType>)> = tag
-        .get_param_list()?
-        .get_types()
-        .enumerate()
-        .map(|(i, doc_type)| (format!("arg{}", i), Some(infer_type(analyzer, doc_type))))
-        .collect();
+        .get_param_list()
+        .map(|list| {
+            list.get_types()
+                .enumerate()
+                .map(|(i, doc_type)| (format!("arg{}", i), Some(infer_type(analyzer, doc_type))))
+                .collect()
+        })
+        .unwrap_or_default();
 
-    operands.insert(
-        0,
-        (
-            "self".to_string(),
-            Some(LuaType::Ref(current_type_id.clone())),
-        ),
-    );
+    let self_name = if op_kind == LuaOperatorMetaMethod::Call {
+        "@call_self"
+    } else {
+        "self"
+    };
+    operands.insert(0, (self_name.to_string(), Some(LuaType::SelfInfer)));
 
     let return_type = if let Some(return_type) = tag.get_return_type() {
         infer_type(analyzer, return_type)
@@ -185,6 +195,7 @@ pub fn analyze_operator(analyzer: &mut DocAnalyzer, tag: LuaDocTagOperator) -> O
         analyzer.file_id,
         name_token.get_range(),
         OperatorFunction::Func(Arc::new(LuaFunctionType::new(
+            AsyncState::None,
             false,
             false,
             operands,
@@ -198,11 +209,11 @@ pub fn analyze_operator(analyzer: &mut DocAnalyzer, tag: LuaDocTagOperator) -> O
 }
 
 fn get_visibility_from_field_attrib(tag: &LuaDocTagField) -> Option<VisibilityKind> {
-    if let Some(attrib) = tag.get_attrib() {
+    if let Some(attrib) = tag.get_type_flag() {
         for token in attrib.get_attrib_tokens() {
             let visibility = VisibilityKind::to_visibility_kind(token.get_name_text());
-            if visibility != VisibilityKind::None {
-                return Some(visibility);
+            if visibility.is_some() {
+                return visibility;
             }
         }
     }

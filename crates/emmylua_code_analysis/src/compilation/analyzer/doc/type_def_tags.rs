@@ -1,22 +1,26 @@
-use std::collections::HashMap;
-
 use emmylua_parser::{
     LuaAssignStat, LuaAst, LuaAstNode, LuaAstToken, LuaCommentOwner, LuaDocDescription,
-    LuaDocDescriptionOwner, LuaDocGenericDeclList, LuaDocTagAlias, LuaDocTagClass, LuaDocTagEnum,
-    LuaDocTagGeneric, LuaFuncStat, LuaLocalName, LuaLocalStat, LuaNameExpr, LuaSyntaxId,
-    LuaSyntaxKind, LuaTokenKind, LuaVarExpr,
+    LuaDocDescriptionOwner, LuaDocGenericDeclList, LuaDocTagAlias, LuaDocTagAttribute,
+    LuaDocTagClass, LuaDocTagEnum, LuaDocTagGeneric, LuaFuncStat, LuaLocalName, LuaLocalStat,
+    LuaNameExpr, LuaSyntaxId, LuaSyntaxKind, LuaTokenKind, LuaVarExpr,
 };
 use rowan::TextRange;
-
-use crate::{
-    compilation::analyzer::bind_type::bind_type,
-    db_index::{LuaDeclId, LuaMemberId, LuaSemanticDeclId, LuaSignatureId, LuaType},
-    LuaTypeCache, LuaTypeDeclId,
-};
+use smol_str::SmolStr;
 
 use super::{
-    infer_type::infer_type, preprocess_description, tags::find_owner_closure, DocAnalyzer,
+    DocAnalyzer, infer_type::infer_type, preprocess_description, tags::find_owner_closure,
 };
+use crate::GenericParam;
+use crate::compilation::analyzer::doc::tags::report_orphan_tag;
+use crate::{
+    LuaTypeCache, LuaTypeDeclId,
+    compilation::analyzer::common::bind_type,
+    db_index::{
+        LuaDeclId, LuaGenericParamInfo, LuaMemberId, LuaSemanticDeclId, LuaSignatureId, LuaType,
+    },
+};
+use std::sync::Arc;
+use std::vec;
 
 pub fn analyze_class(analyzer: &mut DocAnalyzer, tag: LuaDocTagClass) -> Option<()> {
     let file_id = analyzer.file_id;
@@ -30,20 +34,14 @@ pub fn analyze_class(analyzer: &mut DocAnalyzer, tag: LuaDocTagClass) -> Option<
     let class_decl_id = class_decl.get_id();
     analyzer.current_type_id = Some(class_decl_id.clone());
     if let Some(generic_params) = tag.get_generic_decl() {
-        let params = get_generic_params(analyzer, generic_params);
-        let mut params_index = HashMap::new();
-        let mut count = 0;
-        for (name, _) in params.iter() {
-            params_index.insert(name.clone(), count);
-            count += 1;
-        }
+        let generic_params = get_generic_params(analyzer, generic_params);
 
         analyzer
             .db
             .get_type_index_mut()
-            .add_generic_params(class_decl_id.clone(), params);
+            .add_generic_params(class_decl_id.clone(), generic_params.clone());
 
-        add_generic_index(analyzer, params_index);
+        add_generic_index(analyzer, generic_params, &tag);
     }
 
     if let Some(supers) = tag.get_supers() {
@@ -73,15 +71,6 @@ fn add_description_for_type_decl(
     descriptions: Vec<LuaDocDescription>,
 ) {
     let mut description_text = String::new();
-
-    // let comment = analyzer.comment.clone();
-    // if let Some(description) = comment.get_description() {
-    //     let description = preprocess_description(&description.get_description_text(), None);
-    //     if !description.is_empty() {
-    //         description_text.push_str(&description);
-    //     }
-    // }
-
     for description in descriptions {
         let description = preprocess_description(&description.get_description_text(), None);
         if !description.is_empty() {
@@ -154,22 +143,17 @@ pub fn analyze_alias(analyzer: &mut DocAnalyzer, tag: LuaDocTagAlias) -> Option<
     };
 
     if let Some(generic_params) = tag.get_generic_decl_list() {
-        let params = get_generic_params(analyzer, generic_params);
-        let mut params_index = HashMap::new();
-        let mut count = 0;
-        for (name, _) in params.iter() {
-            params_index.insert(name.clone(), count);
-            count += 1;
-        }
+        let generic_params = get_generic_params(analyzer, generic_params);
 
         analyzer
             .db
             .get_type_index_mut()
-            .add_generic_params(alias_decl_id.clone(), params);
+            .add_generic_params(alias_decl_id.clone(), generic_params.clone());
         let range = analyzer.comment.get_range();
+        let scope_id = analyzer.generic_index.add_generic_scope(vec![range], false);
         analyzer
             .generic_index
-            .add_generic_scope(vec![range], params_index, false);
+            .append_generic_params(scope_id, generic_params);
     }
 
     let origin_type = infer_type(analyzer, tag.get_type()?);
@@ -186,34 +170,60 @@ pub fn analyze_alias(analyzer: &mut DocAnalyzer, tag: LuaDocTagAlias) -> Option<
     Some(())
 }
 
+/// 分析属性定义
+pub fn analyze_attribute(analyzer: &mut DocAnalyzer, tag: LuaDocTagAttribute) -> Option<()> {
+    let file_id = analyzer.file_id;
+    let name = tag.get_name_token()?.get_name_text().to_string();
+
+    let decl_id = {
+        let decl = analyzer
+            .db
+            .get_type_index()
+            .find_type_decl(file_id, &name)?;
+        if !decl.is_attribute() {
+            return None;
+        }
+        decl.get_id()
+    };
+    let attribute_type = infer_type(analyzer, tag.get_type()?);
+    let attribute_decl = analyzer
+        .db
+        .get_type_index_mut()
+        .get_type_decl_mut(&decl_id)?;
+    attribute_decl.add_attribute_type(attribute_type);
+
+    add_description_for_type_decl(analyzer, &decl_id, tag.get_descriptions());
+    Some(())
+}
+
 fn get_generic_params(
     analyzer: &mut DocAnalyzer,
     params: LuaDocGenericDeclList,
-) -> Vec<(String, Option<LuaType>)> {
+) -> Vec<GenericParam> {
     let mut params_result = Vec::new();
     for param in params.get_generic_decl() {
         let name = if let Some(param) = param.get_name_token() {
-            param.get_name_text().to_string()
+            SmolStr::new(param.get_name_text())
         } else {
             continue;
         };
+        let type_ref = param
+            .get_type()
+            .map(|type_ref| infer_type(analyzer, type_ref));
 
-        let type_ref = if let Some(type_ref) = param.get_type() {
-            Some(infer_type(analyzer, type_ref))
-        } else {
-            None
-        };
-
-        params_result.push((name, type_ref));
+        params_result.push(GenericParam::new(name, type_ref, None));
     }
 
     params_result
 }
 
-fn add_generic_index(analyzer: &mut DocAnalyzer, params_index: HashMap<String, usize>) {
+fn add_generic_index(
+    analyzer: &mut DocAnalyzer,
+    generic_params: Vec<GenericParam>,
+    tag: &LuaDocTagClass,
+) {
     let mut ranges = Vec::new();
-    let range = analyzer.comment.get_range();
-    ranges.push(range);
+    ranges.push(tag.get_effective_range());
     if let Some(comment_owner) = analyzer.comment.get_owner() {
         let range = comment_owner.get_range();
         ranges.push(range);
@@ -232,9 +242,10 @@ fn add_generic_index(analyzer: &mut DocAnalyzer, params_index: HashMap<String, u
         }
     }
 
+    let scope_id = analyzer.generic_index.add_generic_scope(ranges, false);
     analyzer
         .generic_index
-        .add_generic_scope(ranges, params_index, false);
+        .append_generic_params(scope_id, generic_params);
 }
 
 fn get_local_stat_reference_ranges(
@@ -245,32 +256,31 @@ fn get_local_stat_reference_ranges(
     let first_local = local_stat.child::<LuaLocalName>()?;
     let decl_id = LuaDeclId::new(file_id, first_local.get_position());
     let mut ranges = Vec::new();
-    let refs = analyzer
+    let decl_ref = analyzer
         .db
         .get_reference_index_mut()
         .get_decl_references(&file_id, &decl_id)?;
-    for decl_ref in refs {
-        let syntax_id = LuaSyntaxId::new(LuaSyntaxKind::NameExpr.into(), decl_ref.range.clone());
+    for decl_ref in &decl_ref.cells {
+        let syntax_id = LuaSyntaxId::new(LuaSyntaxKind::NameExpr.into(), decl_ref.range);
         let name_node = syntax_id.to_node_from_root(&analyzer.root)?;
-        if let Some(parent1) = name_node.parent() {
-            if parent1.kind() == LuaSyntaxKind::IndexExpr.into() {
-                if let Some(parent2) = parent1.parent() {
-                    if parent2.kind() == LuaSyntaxKind::FuncStat.into() {
-                        ranges.push(parent2.text_range());
-                        let stat = LuaFuncStat::cast(parent2)?;
-                        for comment in stat.get_comments() {
-                            ranges.push(comment.get_range());
-                        }
-                    } else if parent2.kind() == LuaSyntaxKind::AssignStat.into() {
-                        let stat = LuaAssignStat::cast(parent2)?;
-                        if let Some(assign_token) = stat.token_by_kind(LuaTokenKind::TkAssign) {
-                            if assign_token.get_position() > decl_ref.range.start() {
-                                ranges.push(stat.get_range());
-                                for comment in stat.get_comments() {
-                                    ranges.push(comment.get_range());
-                                }
-                            }
-                        }
+        if let Some(parent1) = name_node.parent()
+            && parent1.kind() == LuaSyntaxKind::IndexExpr.into()
+            && let Some(parent2) = parent1.parent()
+        {
+            if parent2.kind() == LuaSyntaxKind::FuncStat.into() {
+                ranges.push(parent2.text_range());
+                let stat = LuaFuncStat::cast(parent2)?;
+                for comment in stat.get_comments() {
+                    ranges.push(comment.get_range());
+                }
+            } else if parent2.kind() == LuaSyntaxKind::AssignStat.into() {
+                let stat = LuaAssignStat::cast(parent2)?;
+                if let Some(assign_token) = stat.get_assign_op()
+                    && assign_token.get_position() > decl_ref.range.start()
+                {
+                    ranges.push(stat.get_range());
+                    for comment in stat.get_comments() {
+                        ranges.push(comment.get_range());
                     }
                 }
             }
@@ -295,25 +305,24 @@ fn get_global_reference_ranges(
         .get_global_file_references(&name, file_id)?;
     for syntax_id in ref_syntax_ids {
         let name_node = syntax_id.to_node_from_root(&analyzer.root)?;
-        if let Some(parent1) = name_node.parent() {
-            if parent1.kind() == LuaSyntaxKind::IndexExpr.into() {
-                if let Some(parent2) = parent1.parent() {
-                    if parent2.kind() == LuaSyntaxKind::FuncStat.into() {
-                        ranges.push(parent2.text_range());
-                        let stat = LuaFuncStat::cast(parent2)?;
-                        for comment in stat.get_comments() {
-                            ranges.push(comment.get_range());
-                        }
-                    } else if parent2.kind() == LuaSyntaxKind::AssignStat.into() {
-                        let stat = LuaAssignStat::cast(parent2)?;
-                        if let Some(assign_token) = stat.token_by_kind(LuaTokenKind::TkAssign) {
-                            if assign_token.get_position() > syntax_id.get_range().start() {
-                                ranges.push(stat.get_range());
-                                for comment in stat.get_comments() {
-                                    ranges.push(comment.get_range());
-                                }
-                            }
-                        }
+        if let Some(parent1) = name_node.parent()
+            && parent1.kind() == LuaSyntaxKind::IndexExpr.into()
+            && let Some(parent2) = parent1.parent()
+        {
+            if parent2.kind() == LuaSyntaxKind::FuncStat.into() {
+                ranges.push(parent2.text_range());
+                let stat = LuaFuncStat::cast(parent2)?;
+                for comment in stat.get_comments() {
+                    ranges.push(comment.get_range());
+                }
+            } else if parent2.kind() == LuaSyntaxKind::AssignStat.into() {
+                let stat = LuaAssignStat::cast(parent2)?;
+                if let Some(assign_token) = stat.token_by_kind(LuaTokenKind::TkAssign)
+                    && assign_token.get_position() > syntax_id.get_range().start()
+                {
+                    ranges.push(stat.get_range());
+                    for comment in stat.get_comments() {
+                        ranges.push(comment.get_range());
                     }
                 }
             }
@@ -324,38 +333,43 @@ fn get_global_reference_ranges(
 }
 
 pub fn analyze_func_generic(analyzer: &mut DocAnalyzer, tag: LuaDocTagGeneric) -> Option<()> {
-    let comment_owner = analyzer.comment.get_owner()?;
-    let mut params_result = HashMap::new();
+    let Some(comment_owner) = analyzer.comment.get_owner() else {
+        report_orphan_tag(analyzer, &tag);
+        return None;
+    };
+
+    let scope_id = analyzer.generic_index.add_generic_scope(
+        vec![analyzer.comment.get_range(), comment_owner.get_range()],
+        true,
+    );
+
     let mut param_info = Vec::new();
     if let Some(params_list) = tag.get_generic_decl_list() {
-        let mut count = 0;
         for param in params_list.get_generic_decl() {
-            let name = if let Some(param) = param.get_name_token() {
-                param.get_name_text().to_string()
-            } else {
+            let Some(name_token) = param.get_name_token() else {
                 continue;
             };
+            let name_text = name_token.get_name_text().to_string();
+            let smol_name = SmolStr::new(name_text.as_str());
+            analyzer
+                .generic_index
+                .append_generic_param(scope_id, GenericParam::new(smol_name.clone(), None, None));
 
-            let type_ref = if let Some(type_ref) = param.get_type() {
-                Some(infer_type(analyzer, type_ref))
-            } else {
-                None
-            };
+            let type_ref = param
+                .get_type()
+                .map(|type_ref| infer_type(analyzer, type_ref));
 
-            params_result.insert(name.clone(), count);
-            param_info.push((name, type_ref));
-            count += 1;
+            analyzer.generic_index.set_param_constraint(
+                scope_id,
+                name_text.as_str(),
+                type_ref.clone(),
+            );
+
+            param_info.push(Arc::new(LuaGenericParamInfo::new(
+                name_text, type_ref, None,
+            )));
         }
     }
-
-    let mut ranges = Vec::new();
-    let range = analyzer.comment.get_range();
-    ranges.push(range);
-    let range = comment_owner.get_range();
-    ranges.push(range);
-    analyzer
-        .generic_index
-        .add_generic_scope(ranges, params_result, true);
 
     let closure = find_owner_closure(analyzer)?;
     let signature_id = LuaSignatureId::from_closure(analyzer.file_id, &closure);

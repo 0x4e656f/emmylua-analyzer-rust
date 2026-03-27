@@ -1,12 +1,12 @@
 use std::ops::Deref;
 
-use emmylua_parser::{LuaDocFieldKey, LuaIndexKey, LuaSyntaxId, LuaSyntaxKind};
+use emmylua_parser::{LuaIndexKey, LuaSyntaxId, LuaSyntaxKind, NumberResult};
 use rowan::{TextRange, TextSize};
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
 use super::lua_member_feature::LuaMemberFeature;
-use crate::{infer_expr, DbIndex, FileId, GlobalId, InferFailReason, LuaInferCache, LuaType};
+use crate::{DbIndex, FileId, GlobalId, InferFailReason, LuaInferCache, LuaType, infer_expr};
 
 #[derive(Debug)]
 pub struct LuaMember {
@@ -58,7 +58,7 @@ impl LuaMember {
     }
 
     pub fn is_field(&self) -> bool {
-        LuaSyntaxKind::DocTagField == self.member_id.get_syntax_id().get_kind().into()
+        LuaSyntaxKind::DocTagField == self.member_id.get_syntax_id().get_kind()
     }
 
     pub fn get_feature(&self) -> LuaMemberFeature {
@@ -107,7 +107,13 @@ impl LuaMemberKey {
         match key {
             LuaIndexKey::Name(name) => Ok(LuaMemberKey::Name(name.get_name_text().into())),
             LuaIndexKey::String(str) => Ok(LuaMemberKey::Name(str.get_value().into())),
-            LuaIndexKey::Integer(i) => Ok(LuaMemberKey::Integer(i.get_int_value())),
+            LuaIndexKey::Integer(i) => {
+                if let NumberResult::Int(idx) = i.get_number_value() {
+                    Ok(LuaMemberKey::Integer(idx))
+                } else {
+                    Err(InferFailReason::FieldNotFound)
+                }
+            }
             LuaIndexKey::Idx(idx) => Ok(LuaMemberKey::Integer(*idx as i64)),
             LuaIndexKey::Expr(expr) => {
                 let expr_type = infer_expr(db, cache, expr.clone())?;
@@ -184,32 +190,6 @@ impl Ord for LuaMemberKey {
             (Name(_), _) => std::cmp::Ordering::Less,
             (_, Name(_)) => std::cmp::Ordering::Greater,
             (ExprType(_), ExprType(_)) => std::cmp::Ordering::Equal,
-        }
-    }
-}
-
-impl From<LuaDocFieldKey> for LuaMemberKey {
-    fn from(key: LuaDocFieldKey) -> Self {
-        match key {
-            LuaDocFieldKey::Name(name) => {
-                LuaMemberKey::Name(name.get_name_text().to_string().into())
-            }
-            LuaDocFieldKey::String(str) => LuaMemberKey::Name(str.get_value().into()),
-            LuaDocFieldKey::Integer(i) => LuaMemberKey::Integer(i.get_int_value()),
-            _ => LuaMemberKey::None,
-        }
-    }
-}
-
-impl From<&LuaDocFieldKey> for LuaMemberKey {
-    fn from(key: &LuaDocFieldKey) -> Self {
-        match key {
-            LuaDocFieldKey::Name(name) => {
-                LuaMemberKey::Name(name.get_name_text().to_string().into())
-            }
-            LuaDocFieldKey::String(str) => LuaMemberKey::Name(str.get_value().into()),
-            LuaDocFieldKey::Integer(i) => LuaMemberKey::Integer(i.get_int_value()),
-            _ => LuaMemberKey::None,
         }
     }
 }

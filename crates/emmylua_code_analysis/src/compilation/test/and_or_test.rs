@@ -52,10 +52,9 @@ mod test {
         );
 
         let a_ty = ws.expr_ty("a");
-        assert_eq!(
-            format!("{:?}", a_ty).to_string(),
-            "Union(LuaUnionType { types: [IntegerConst(2), Nil] })"
-        );
+        let a_humanize = ws.humanize_type(a_ty);
+        let a_expected = "2?";
+        assert_eq!(a_humanize, a_expected);
     }
 
     #[test]
@@ -119,6 +118,21 @@ mod test {
 
             --- @type string[]
             local commands = type(command_provider) == 'table' and command_provider.commands or {}
+            "#,
+        ));
+    }
+
+    #[test]
+    fn test_issue_644() {
+        let mut ws = VirtualWorkspace::new();
+
+        assert!(ws.check_code_for(
+            DiagnosticCode::NeedCheckNil,
+            r#"
+            --- @alias mapfn fun()
+
+            local f1 --- @type string|mapfn
+            local _ = type(f1) ~= 'function' and f1 or f1()
             "#,
         ));
     }

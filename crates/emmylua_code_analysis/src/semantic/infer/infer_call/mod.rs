@@ -4,18 +4,22 @@ use emmylua_parser::{LuaAstNode, LuaCallExpr, LuaExpr, LuaSyntaxKind};
 use rowan::TextRange;
 
 use super::{
-    super::{
-        generic::{instantiate_func_generic, TypeSubstitutor},
-        instantiate_type_generic, resolve_signature, InferGuard, LuaInferCache,
-    },
+    super::{InferGuard, LuaInferCache, instantiate_type_generic, resolve_signature},
     InferFailReason, InferResult,
 };
-use crate::semantic::infer_expr;
-use crate::{semantic::generic::instantiate_doc_function, LuaVarRefId};
 use crate::{
-    CacheEntry, CacheKey, DbIndex, InFiled, LuaFunctionType, LuaGenericType, LuaInstanceType,
-    LuaOperatorMetaMethod, LuaOperatorOwner, LuaSignatureId, LuaType, LuaTypeDeclId, LuaUnionType,
+    CacheEntry, DbIndex, InFiled, LuaFunctionType, LuaGenericType, LuaInstanceType,
+    LuaIntersectionType, LuaOperatorMetaMethod, LuaOperatorOwner, LuaSignature, LuaSignatureId,
+    LuaType, LuaTypeDeclId, LuaUnionType, TypeVisitTrait,
 };
+use crate::{
+    InferGuardRef,
+    semantic::{
+        generic::{TypeSubstitutor, get_tpl_ref_extend_type, instantiate_doc_function},
+        infer::narrow::get_type_at_call_expr_inline_cast,
+    },
+};
+use crate::{build_self_type, infer_self_type, instantiate_func_generic, semantic::infer_expr};
 use infer_require::infer_require_call;
 use infer_setmetatable::infer_setmetatable_call;
 
@@ -29,31 +33,26 @@ pub fn infer_call_expr_func(
     cache: &mut LuaInferCache,
     call_expr: LuaCallExpr,
     call_expr_type: LuaType,
-    infer_guard: &mut InferGuard,
+    infer_guard: &InferGuardRef,
     args_count: Option<usize>,
 ) -> InferCallFuncResult {
     let syntax_id = call_expr.get_syntax_id();
-    let key = CacheKey::Call(syntax_id, args_count, call_expr_type.clone());
-    match cache.get(&key) {
-        Some(cache) => match cache {
-            CacheEntry::CallCache(ty) => return Ok(ty.clone()),
+    let key = (syntax_id, args_count, call_expr_type.clone());
+    if let Some(cache) = cache.call_cache.get(&key) {
+        match cache {
+            CacheEntry::Cache(ty) => return Ok(ty.clone()),
             _ => return Err(InferFailReason::RecursiveInfer),
-        },
-        None => {}
+        }
     }
 
-    cache.ready_cache(&key);
+    cache.call_cache.insert(key.clone(), CacheEntry::Ready);
     let result = match &call_expr_type {
         LuaType::DocFunction(func) => {
-            infer_doc_function(db, cache, &func, call_expr.clone(), args_count)
+            infer_doc_function(db, cache, func, call_expr.clone(), args_count)
         }
-        LuaType::Signature(signature_id) => infer_signature_doc_function(
-            db,
-            cache,
-            signature_id.clone(),
-            call_expr.clone(),
-            args_count,
-        ),
+        LuaType::Signature(signature_id) => {
+            infer_signature_doc_function(db, cache, *signature_id, call_expr.clone(), args_count)
+        }
         LuaType::Def(type_def_id) => infer_type_doc_function(
             db,
             cache,
@@ -75,60 +74,106 @@ pub fn infer_call_expr_func(
         LuaType::Generic(generic) => infer_generic_type_doc_function(
             db,
             cache,
-            &generic,
+            generic,
             call_expr.clone(),
             infer_guard,
             args_count,
         ),
-        LuaType::Instance(inst) => infer_instance_type_doc_function(
+        LuaType::Instance(inst) => infer_instance_type_doc_function(db, inst),
+        LuaType::TableConst(meta_table) => infer_table_type_doc_function(db, meta_table.clone()),
+        LuaType::TplRef(_) | LuaType::ConstTplRef(_) | LuaType::StrTplRef(_) => infer_tpl_ref_call(
             db,
             cache,
-            &inst,
+            call_expr.clone(),
+            &call_expr_type,
+            infer_guard,
+            args_count,
+        ),
+        LuaType::Intersection(intersection) => infer_intersection(
+            db,
+            cache,
+            intersection,
             call_expr.clone(),
             infer_guard,
             args_count,
         ),
-        LuaType::TableConst(meta_table) => infer_table_type_doc_function(db, meta_table.clone()),
         LuaType::Union(union) => {
             // 此时我们将其视为泛型实例化联合体
             if union
-                .get_types()
+                .into_vec()
                 .iter()
                 .all(|t| matches!(t, LuaType::DocFunction(_)))
             {
-                infer_generic_doc_function_union(db, cache, &union, call_expr.clone(), args_count)
+                infer_generic_doc_function_union(db, cache, union, call_expr.clone(), args_count)
             } else {
-                infer_union(db, cache, &union, call_expr.clone(), args_count)
+                infer_union(db, cache, union, call_expr.clone(), args_count)
             }
         }
         _ => Err(InferFailReason::None),
     };
 
     let result = if let Ok(func_ty) = result {
-        unwrapp_return_type(db, cache, func_ty.get_ret().clone(), call_expr).map(|new_ret| {
-            LuaFunctionType::new(
-                func_ty.is_async(),
-                func_ty.is_colon_define(),
-                func_ty.get_params().to_vec(),
-                new_ret,
-            )
-            .into()
-        })
+        let func_ty = match func_ty.get_ret() {
+            LuaType::Call(_) => {
+                match instantiate_func_generic(db, cache, func_ty.as_ref(), call_expr.clone()) {
+                    Ok(func_ty) => Arc::new(func_ty),
+                    Err(_) => func_ty,
+                }
+            }
+            _ => func_ty,
+        };
+
+        let func_ret = func_ty.get_ret();
+        match func_ret {
+            LuaType::TypeGuard(_) => Ok(func_ty),
+            _ => unwrapp_return_type(db, cache, func_ret.clone(), call_expr).map(|new_ret| {
+                LuaFunctionType::new(
+                    func_ty.get_async_state(),
+                    func_ty.is_colon_define(),
+                    func_ty.is_variadic(),
+                    func_ty.get_params().to_vec(),
+                    new_ret,
+                )
+                .into()
+            }),
+        }
     } else {
         result
     };
 
     match &result {
         Ok(func_ty) => {
-            cache.add_cache(&key, CacheEntry::CallCache(func_ty.clone()));
+            cache
+                .call_cache
+                .insert(key, CacheEntry::Cache(func_ty.clone()));
         }
         Err(r) if r.is_need_resolve() => {
-            cache.remove(&key);
+            cache.call_cache.remove(&key);
+        }
+        Err(InferFailReason::None) => {
+            cache.call_cache.remove(&key);
         }
         _ => {}
     }
 
     result
+}
+
+fn infer_tpl_ref_call(
+    db: &DbIndex,
+    cache: &mut LuaInferCache,
+    call_expr: LuaCallExpr,
+    call_expr_type: &LuaType,
+    infer_guard: &InferGuardRef,
+    args_count: Option<usize>,
+) -> InferCallFuncResult {
+    let prefix_expr = call_expr.get_prefix_expr().ok_or(InferFailReason::None)?;
+    let extend_type = get_tpl_ref_extend_type(db, cache, call_expr_type, prefix_expr, 0)
+        .ok_or(InferFailReason::None)?;
+    if &extend_type == call_expr_type {
+        return Err(InferFailReason::None);
+    }
+    infer_call_expr_func(db, cache, call_expr, extend_type, infer_guard, args_count)
 }
 
 fn infer_doc_function(
@@ -143,7 +188,7 @@ fn infer_doc_function(
         return Ok(Arc::new(result));
     }
 
-    return Ok(func.clone().into());
+    Ok(func.clone().into())
 }
 
 fn infer_generic_doc_function_union(
@@ -154,7 +199,7 @@ fn infer_generic_doc_function_union(
     args_count: Option<usize>,
 ) -> InferCallFuncResult {
     let overloads = union
-        .get_types()
+        .into_vec()
         .iter()
         .filter_map(|typ| match typ {
             LuaType::DocFunction(f) => Some(f.clone()),
@@ -179,15 +224,17 @@ fn infer_signature_doc_function(
     if !signature.is_resolve_return() {
         return Err(InferFailReason::UnResolveSignatureReturn(signature_id));
     }
+    let is_generic = signature_is_generic(db, cache, &signature, &call_expr).unwrap_or(false);
     let overloads = &signature.overloads;
     if overloads.is_empty() {
         let mut fake_doc_function = LuaFunctionType::new(
-            signature.is_async,
+            signature.async_state,
             signature.is_colon_define,
+            signature.is_vararg,
             signature.get_type_params(),
             signature.get_return_type(),
         );
-        if signature.is_generic() {
+        if is_generic {
             fake_doc_function = instantiate_func_generic(db, cache, &fake_doc_function, call_expr)?;
         }
 
@@ -195,8 +242,9 @@ fn infer_signature_doc_function(
     } else {
         let mut new_overloads = signature.overloads.clone();
         let fake_doc_function = Arc::new(LuaFunctionType::new(
-            signature.is_async,
+            signature.async_state,
             signature.is_colon_define,
+            signature.is_vararg,
             signature.get_type_params(),
             signature.get_return_type(),
         ));
@@ -207,7 +255,7 @@ fn infer_signature_doc_function(
             cache,
             new_overloads,
             call_expr.clone(),
-            signature.is_generic(),
+            is_generic,
             args_count,
         )
     }
@@ -219,14 +267,14 @@ fn infer_type_doc_function(
     type_id: LuaTypeDeclId,
     call_expr: LuaCallExpr,
     call_expr_type: &LuaType,
-    infer_guard: &mut InferGuard,
+    infer_guard: &InferGuardRef,
     args_count: Option<usize>,
 ) -> InferCallFuncResult {
     infer_guard.check(&type_id)?;
     let type_decl = db
         .get_type_index()
         .get_type_decl(&type_id)
-        .ok_or(InferFailReason::None)?;
+        .ok_or_else(|| InferFailReason::UnResolveTypeDecl(type_id.clone()))?;
     if type_decl.is_alias() {
         let origin_type = type_decl
             .get_alias_origin(db, None)
@@ -245,8 +293,8 @@ fn infer_type_doc_function(
 
     let operator_index = db.get_operator_index();
     let operator_ids = operator_index
-        .get_operators(&type_id.into(), LuaOperatorMetaMethod::Call)
-        .ok_or(InferFailReason::None)?;
+        .get_operators(&type_id.clone().into(), LuaOperatorMetaMethod::Call)
+        .ok_or(InferFailReason::UnResolveOperatorCall)?;
     let mut overloads = Vec::new();
     for overload_id in operator_ids {
         let operator = operator_index
@@ -255,9 +303,24 @@ fn infer_type_doc_function(
         let func = operator.get_operator_func(db);
         match func {
             LuaType::DocFunction(f) => {
-                if f.contain_self() {
+                let has_generic_tpl = {
+                    let mut has_generic_tpl = false;
+                    f.visit_type(&mut |t| {
+                        has_generic_tpl |= matches!(
+                            t,
+                            LuaType::TplRef(_) | LuaType::ConstTplRef(_) | LuaType::StrTplRef(_)
+                        );
+                    });
+                    has_generic_tpl
+                };
+
+                if has_generic_tpl {
+                    let result = instantiate_func_generic(db, cache, &f, call_expr.clone())?;
+                    overloads.push(Arc::new(result));
+                } else if f.contain_self() {
                     let mut substitutor = TypeSubstitutor::new();
-                    substitutor.add_self_type(call_expr_type.clone());
+                    let self_type = build_self_type(db, call_expr_type);
+                    substitutor.add_self_type(self_type);
                     if let LuaType::DocFunction(f) = instantiate_doc_function(db, &f, &substitutor)
                     {
                         overloads.push(f);
@@ -289,7 +352,7 @@ fn infer_generic_type_doc_function(
     cache: &mut LuaInferCache,
     generic: &LuaGenericType,
     call_expr: LuaCallExpr,
-    infer_guard: &mut InferGuard,
+    infer_guard: &InferGuardRef,
     args_count: Option<usize>,
 ) -> InferCallFuncResult {
     let type_id = generic.get_base_type_id();
@@ -300,7 +363,7 @@ fn infer_generic_type_doc_function(
     let type_decl = db
         .get_type_index()
         .get_type_decl(&type_id)
-        .ok_or(InferFailReason::None)?;
+        .ok_or_else(|| InferFailReason::UnResolveTypeDecl(type_id.clone()))?;
     if type_decl.is_alias() {
         let origin_type = type_decl
             .get_alias_origin(db, Some(&substitutor))
@@ -348,7 +411,7 @@ fn infer_generic_type_doc_function(
                 if let LuaType::DocFunction(f) = new_f {
                     overloads.push(f.clone());
                 }
-                // todo: support oveload?
+                // todo: support overload?
             }
             _ => {}
         }
@@ -359,24 +422,13 @@ fn infer_generic_type_doc_function(
 
 fn infer_instance_type_doc_function(
     db: &DbIndex,
-    cache: &mut LuaInferCache,
     instance: &LuaInstanceType,
-    call_expr: LuaCallExpr,
-    infer_guard: &mut InferGuard,
-    args_count: Option<usize>,
 ) -> InferCallFuncResult {
     let base = instance.get_base();
     let base_table = match &base {
         LuaType::TableConst(meta_table) => meta_table.clone(),
         LuaType::Instance(inst) => {
-            return infer_instance_type_doc_function(
-                db,
-                cache,
-                inst,
-                call_expr,
-                infer_guard,
-                args_count,
-            );
+            return infer_instance_type_doc_function(db, inst);
         }
         _ => return Err(InferFailReason::None),
     };
@@ -406,7 +458,7 @@ fn infer_table_type_doc_function(db: &DbIndex, table: InFiled<TextRange>) -> Inf
         let func = operator.get_operator_func(db);
         match func {
             LuaType::DocFunction(func) => {
-                return Ok(func.into());
+                return Ok(func);
             }
             LuaType::Signature(signature_id) => {
                 let signature = db
@@ -417,7 +469,7 @@ fn infer_table_type_doc_function(db: &DbIndex, table: InFiled<TextRange>) -> Inf
                     return Err(InferFailReason::UnResolveSignatureReturn(signature_id));
                 }
 
-                return Ok(signature.to_call_operator_func_type().into());
+                return Ok(signature.to_call_operator_func_type());
             }
             _ => {}
         }
@@ -437,10 +489,10 @@ fn infer_union(
     let mut all_overloads = Vec::new();
     let mut base_signatures = Vec::new();
 
-    for ty in union.get_types() {
+    for ty in union.into_vec() {
         match ty {
             LuaType::Signature(signature_id) => {
-                if let Some(signature) = db.get_signature_index().get(signature_id) {
+                if let Some(signature) = db.get_signature_index().get(&signature_id) {
                     // 处理 overloads
                     let overloads = if signature.is_generic() {
                         signature
@@ -462,8 +514,9 @@ fn infer_union(
 
                     // 处理 signature 本身的函数类型
                     let mut fake_doc_function = LuaFunctionType::new(
-                        signature.is_async,
+                        signature.async_state,
                         signature.is_colon_define,
+                        signature.is_vararg,
                         signature.get_type_params(),
                         signature.get_return_type(),
                     );
@@ -483,7 +536,7 @@ fn infer_union(
                     Arc::new(instantiate_func_generic(
                         db,
                         cache,
-                        func,
+                        &func,
                         call_expr.clone(),
                     )?)
                 } else {
@@ -500,6 +553,48 @@ fn infer_union(
         return Err(InferFailReason::None);
     }
     resolve_signature(db, cache, all_overloads, call_expr, false, args_count)
+}
+
+fn infer_intersection(
+    db: &DbIndex,
+    cache: &mut LuaInferCache,
+    intersection: &LuaIntersectionType,
+    call_expr: LuaCallExpr,
+    infer_guard: &InferGuardRef,
+    args_count: Option<usize>,
+) -> InferCallFuncResult {
+    let mut overloads = Vec::new();
+    let mut need_resolve = None;
+
+    for ty in intersection.get_types() {
+        match infer_call_expr_func(
+            db,
+            cache,
+            call_expr.clone(),
+            ty.clone(),
+            infer_guard,
+            args_count,
+        ) {
+            Ok(func) => overloads.push(func),
+            Err(InferFailReason::RecursiveInfer) => return Err(InferFailReason::RecursiveInfer),
+            Err(reason) if reason.is_need_resolve() => {
+                if need_resolve.is_none() {
+                    need_resolve = Some(reason);
+                }
+            }
+            Err(_) => {}
+        }
+    }
+
+    if overloads.is_empty() {
+        return Err(need_resolve.unwrap_or(InferFailReason::None));
+    }
+
+    if overloads.len() == 1 {
+        return Ok(overloads.pop().expect("single callable member"));
+    }
+
+    resolve_signature(db, cache, overloads, call_expr, false, args_count)
 }
 
 pub(crate) fn unwrapp_return_type(
@@ -546,26 +641,16 @@ pub(crate) fn unwrapp_return_type(
             return Ok(return_type);
         }
 
-        LuaType::Variadic(variadic) => {
+        ty if ty.contain_multi_return() => {
             if is_last_call_expr(&call_expr) {
-                return Ok(return_type);
+                return Ok(ty.clone());
             }
 
-            return match variadic.get_type(0) {
-                Some(ty) => Ok(ty.clone()),
-                None => Ok(LuaType::Nil),
-            };
+            return Ok(ty.get_result_slot_type(0).unwrap_or(LuaType::Nil));
         }
         LuaType::SelfInfer => {
-            let prefix_expr = call_expr.get_prefix_expr();
-            if let Some(prefix_expr) = prefix_expr {
-                if let LuaExpr::IndexExpr(index) = prefix_expr {
-                    let self_expr = index.get_prefix_expr();
-                    if let Some(self_expr) = self_expr {
-                        let self_type = infer_expr(db, cache, self_expr.into());
-                        return self_type;
-                    }
-                }
+            if let Some(self_type) = infer_self_type(db, cache, &call_expr) {
+                return Ok(self_type);
             }
         }
         LuaType::TypeGuard(_) => return Ok(LuaType::Boolean),
@@ -584,7 +669,7 @@ fn is_need_wrap_instance(
         return true;
     }
 
-    return !call_expr.get_range().contains(inst.value.start());
+    !call_expr.get_range().contains(inst.value.start())
 }
 
 fn is_last_call_expr(call_expr: &LuaCallExpr) -> bool {
@@ -625,25 +710,23 @@ pub fn infer_call_expr(
 
     let prefix_expr = call_expr.get_prefix_expr().ok_or(InferFailReason::None)?;
     let prefix_type = infer_expr(db, cache, prefix_expr)?;
-    let mut ret_type = infer_call_expr_func(
+    let ret_type = infer_call_expr_func(
         db,
         cache,
         call_expr.clone(),
         prefix_type,
-        &mut InferGuard::new(),
+        &InferGuard::new(),
         None,
     )?
     .get_ret()
     .clone();
 
-    let file_id = cache.get_file_id();
-    let var_ref_id = LuaVarRefId::SyntaxId(InFiled::new(file_id, call_expr.get_syntax_id()));
-    let flow_chain = db.get_flow_index().get_flow_chain(file_id, var_ref_id);
-    if let Some(flow_chain) = flow_chain {
-        let root = call_expr.get_root();
-        for type_assert in flow_chain.get_all_type_asserts() {
-            ret_type = type_assert.tighten_type(db, cache, &root, ret_type)?;
-        }
+    if let Some(tree) = db.get_flow_index().get_flow_tree(&cache.get_file_id())
+        && let Some(flow_id) = tree.get_flow_id(call_expr.get_syntax_id())
+        && let Some(flow_ret_type) =
+            get_type_at_call_expr_inline_cast(db, cache, tree, call_expr, flow_id, ret_type.clone())
+    {
+        return Ok(flow_ret_type);
     }
 
     Ok(ret_type)
@@ -672,4 +755,90 @@ fn check_can_infer(
     }
 
     Ok(())
+}
+
+fn signature_is_generic(
+    db: &DbIndex,
+    cache: &mut LuaInferCache,
+    signature: &LuaSignature,
+    call_expr: &LuaCallExpr,
+) -> Option<bool> {
+    if signature.is_generic() {
+        return Some(true);
+    }
+    let LuaExpr::IndexExpr(index_expr) = call_expr.get_prefix_expr()? else {
+        return None;
+    };
+    let prefix_type = infer_expr(db, cache, index_expr.get_prefix_expr()?).ok()?;
+    match prefix_type {
+        // 对于 Generic 直接认为是泛型
+        LuaType::Generic(_) => Some(true),
+        _ => Some(prefix_type.contain_tpl()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        InferFailReason, InferGuard, LuaType, VirtualWorkspace, semantic::infer_call_expr_func,
+    };
+
+    #[test]
+    fn test_call_cache_non_callable_not_sticky() {
+        let mut ws = VirtualWorkspace::new();
+        let file_id = ws.def("local i = 1\n i()\n");
+        let call_expr = ws.get_node::<emmylua_parser::LuaCallExpr>(file_id);
+        let semantic_model = ws.analysis.compilation.get_semantic_model(file_id).unwrap();
+        let db = semantic_model.get_db();
+        let mut cache = semantic_model.get_cache().borrow_mut();
+        let call_expr_type = LuaType::IntegerConst(1);
+
+        let _ = infer_call_expr_func(
+            db,
+            &mut cache,
+            call_expr.clone(),
+            call_expr_type.clone(),
+            &InferGuard::new(),
+            None,
+        );
+        let second = infer_call_expr_func(
+            db,
+            &mut cache,
+            call_expr,
+            call_expr_type,
+            &InferGuard::new(),
+            None,
+        );
+
+        assert!(!matches!(second, Err(InferFailReason::RecursiveInfer)));
+    }
+
+    #[test]
+    fn test_higher_order_call_with_unresolved_remaining_arg_should_not_hard_fail() {
+        let mut ws = VirtualWorkspace::new();
+        ws.def(
+            r#"
+            ---@generic T, R
+            ---@param f fun(...: T...): R...
+            ---@param ... T...
+            ---@return boolean, R...
+            local function wrap(f, ...) end
+
+            ---@generic U: string
+            ---@param x U
+            ---@return U
+            local function id(x) end
+
+            ---@class Box
+            ---@field value integer
+            ---@type Box
+            local box
+
+            ok, payload = wrap(id, box.missing)
+            "#,
+        );
+
+        assert_eq!(ws.expr_ty("ok"), ws.ty("boolean"));
+        assert_eq!(ws.expr_ty("payload"), ws.ty("string"));
+    }
 }

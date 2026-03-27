@@ -1,8 +1,9 @@
-use crate::kind::LuaLanguageLevel;
+use crate::{LuaNonStdSymbolSet, kind::LuaLanguageLevel};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LexerConfig {
     pub language_level: LuaLanguageLevel,
+    pub non_std_symbols: LuaNonStdSymbolSet,
 }
 
 impl LexerConfig {
@@ -35,7 +36,8 @@ impl LexerConfig {
 impl Default for LexerConfig {
     fn default() -> Self {
         LexerConfig {
-            language_level: LuaLanguageLevel::Lua54,
+            language_level: LuaLanguageLevel::Lua55,
+            non_std_symbols: LuaNonStdSymbolSet::new(),
         }
     }
 }

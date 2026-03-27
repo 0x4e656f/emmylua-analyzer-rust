@@ -1,6 +1,5 @@
 #[cfg(test)]
 mod test {
-    use std::{ops::Deref, sync::Arc};
 
     use crate::{DiagnosticCode, VirtualWorkspace};
 
@@ -9,7 +8,7 @@ mod test {
         let mut ws = VirtualWorkspace::new_with_init_std_lib();
 
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
         table.concat({'', ''}, ' ')
         "#
@@ -29,20 +28,26 @@ mod test {
     }
 
     #[test]
-    fn test_class_default_call() {
-        let mut ws = VirtualWorkspace::new();
-        let mut emmyrc = ws.analysis.emmyrc.deref().clone();
-        emmyrc.runtime.class_default_call.function_name = "__init".to_string();
-        emmyrc.runtime.class_default_call.force_non_colon = true;
-        emmyrc.runtime.class_default_call.force_return_self = true;
-        ws.analysis.update_config(Arc::new(emmyrc));
+    fn test_class_default_constructor() {
+        let mut ws = VirtualWorkspace::new_with_init_std_lib();
+        ws.def(
+            r#"
+
+            ---@generic T
+            ---@[constructor("__init")]
+            ---@param name `T`
+            ---@return T
+            function meta(name)
+            end
+        "#,
+        );
 
         ws.def(
             r#"
         ---@class MyClass
-        local M = {}
-        
-        function M:__init(a)
+        local M = meta("MyClass")
+
+        function M:__init()
         end
 
         A = M()
@@ -52,5 +57,19 @@ mod test {
         let ty = ws.expr_ty("A");
         let expected = ws.ty("MyClass");
         assert_eq!(ws.humanize_type(ty), ws.humanize_type(expected));
+    }
+
+    #[test]
+    fn test_issue_770() {
+        let mut ws = VirtualWorkspace::new_with_init_std_lib();
+        assert!(ws.check_code_for(
+            DiagnosticCode::RedundantParameter,
+            r#"
+        local table = {1,2}
+        if next(table, 2) == '2' then
+            print('ok')
+        end
+        "#
+        ));
     }
 }

@@ -12,7 +12,7 @@ mod test {
                 --- @param command string|string[]
                 __call = function (_, command)
                 end,
-                
+
                 --- @param command string
                 --- @return fun(...:string)
                 __index = function(_, command)
@@ -22,21 +22,21 @@ mod test {
         );
 
         assert!(!ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
             cmd(1)
         "#
         ));
 
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
             cmd("hello)
         "#
         ));
 
         assert!(ws.check_code_for(
-            DiagnosticCode::ParamTypeNotMatch,
+            DiagnosticCode::ParamTypeMismatch,
             r#"
             cmd({ "hello", "world" })
         "#
@@ -72,5 +72,34 @@ mod test {
 
         let ty = ws.expr_ty("a");
         assert_eq!(ws.humanize_type(ty), "switch");
+    }
+
+    #[test]
+    fn test_issue_599() {
+        let mut ws = VirtualWorkspace::new();
+
+        ws.def(
+            r#"
+            ---@class Class.Config
+            ---@field abc string
+            local ClassConfigMeta = {}
+
+            ---@type table<string, Class.Config>
+            local _classConfigMap = {}
+
+
+            ---@param name string
+            ---@return Class.Config
+            local function getConfig(name)
+                local config = _classConfigMap[name]
+                if not config then
+                    A = setmetatable({ name = name }, { __index = ClassConfigMeta })
+                end
+            end
+            "#,
+        );
+
+        let ty = ws.expr_ty("A");
+        assert_eq!(ws.humanize_type(ty), "Class.Config");
     }
 }

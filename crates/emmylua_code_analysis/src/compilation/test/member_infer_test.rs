@@ -24,7 +24,7 @@ mod test {
         let c_ty = ws.expr_ty("c");
 
         let union_type = LuaType::Union(
-            LuaUnionType::new(vec![
+            LuaUnionType::from_vec(vec![
                 LuaType::StringConst(SmolStr::new("a").into()),
                 LuaType::StringConst(SmolStr::new("b").into()),
                 LuaType::StringConst(SmolStr::new("c").into()),
@@ -101,5 +101,227 @@ mod test {
         assert_eq!(d_ty, LuaType::Integer);
         assert_eq!(e_ty, LuaType::Integer);
         assert_eq!(f_ty, LuaType::Integer);
+    }
+
+    #[test]
+    fn test_keyof() {
+        let mut ws = VirtualWorkspace::new();
+
+        ws.def(
+            r#"
+        ---@class SuiteHooks
+        ---@field beforeAll string
+        ---@field afterAll number
+
+        ---@type SuiteHooks
+        local hooks = {}
+
+        ---@type keyof SuiteHooks
+        local name = "beforeAll"
+
+        A = hooks[name]
+        "#,
+        );
+
+        let ty = ws.expr_ty("A");
+        let expected =
+            LuaType::Union(LuaUnionType::from_vec(vec![LuaType::String, LuaType::Number]).into());
+        assert_eq!(ty, expected);
+    }
+
+    #[test]
+    fn test_local_shadow_global_member_owner() {
+        let mut ws = VirtualWorkspace::new_with_init_std_lib();
+
+        ws.def(
+            r#"
+        local table = {}
+        table.unpack = 1
+        A = table.unpack
+        "#,
+        );
+
+        assert_eq!(ws.expr_ty("A"), LuaType::IntegerConst(1));
+    }
+
+    #[test]
+    fn test_assign_table_literal_preserves_class_fields() {
+        let mut ws = VirtualWorkspace::new();
+
+        ws.def(
+            r#"
+        ---@class A
+        ---@field a string
+        ---@field b? number
+
+        ---@type A
+        local a
+        a = { a = "hello" }
+
+        c = a.a
+        "#,
+        );
+
+        assert_eq!(
+            ws.expr_ty("c"),
+            LuaType::StringConst(SmolStr::new("hello").into())
+        );
+    }
+
+    #[test]
+    fn test_assign_object_return_preserves_class_fields() {
+        let mut ws = VirtualWorkspace::new();
+
+        ws.def(
+            r#"
+        ---@class A
+        ---@field a string|number
+        ---@field b number
+
+        ---@return {a: string}
+        local function make()
+            return { a = "hello" }
+        end
+
+        ---@type A
+        local a
+        a = make()
+
+        c = a.a
+        d = a.b
+        "#,
+        );
+
+        assert_eq!(ws.expr_ty("c"), LuaType::String);
+        assert_eq!(ws.expr_ty("d"), LuaType::Number);
+    }
+
+    #[test]
+    fn test_assign_table_literal_preserves_class_fields_from_antecedent() {
+        let mut ws = VirtualWorkspace::new();
+
+        ws.def(
+            r#"
+        ---@class A
+        ---@field a string
+        ---@field b? number
+
+        ---@type A
+        local global_a
+
+        ---@return A
+        local function make()
+            return global_a
+        end
+
+        local a = make()
+        a = { a = "hello" }
+
+        c = a.a
+        "#,
+        );
+
+        assert_eq!(
+            ws.expr_ty("c"),
+            LuaType::StringConst(SmolStr::new("hello").into())
+        );
+    }
+
+    #[test]
+    fn test_assign_from_nil_uses_expr_type() {
+        let mut ws = VirtualWorkspace::new();
+
+        ws.def(
+            r#"
+        local a
+        a = "hello"
+        b = a
+        "#,
+        );
+
+        assert_eq!(
+            ws.expr_ty("b"),
+            LuaType::StringConst(SmolStr::new("hello").into())
+        );
+    }
+
+    #[test]
+    fn test_global_member_owner_prefers_declared_type() {
+        let mut ws = VirtualWorkspace::new();
+        ws.def(
+            r#"
+        ---@class Foo
+        ---@field existing string
+
+        ---@type Foo
+        Foo = {}
+        Foo.extra = 1
+
+        ---@type Foo
+        local other
+
+        A = other.extra
+        "#,
+        );
+
+        assert_eq!(ws.expr_ty("A"), LuaType::Nil);
+    }
+
+    #[test]
+    fn test_non_name_prefix_uses_inferred_type() {
+        let mut ws = VirtualWorkspace::new();
+        ws.def(
+            r#"
+        local t = {}
+        (t).bar = "hi"
+        A = t.bar
+        "#,
+        );
+
+        assert_eq!(
+            ws.expr_ty("A"),
+            LuaType::StringConst(SmolStr::new("hi").into())
+        );
+    }
+
+    #[test]
+    fn test_table_expr_key_string() {
+        let mut ws = VirtualWorkspace::new_with_init_std_lib();
+
+        ws.def(
+            r#"
+        local key = tostring(1)
+        local t = { [key] = 1 }
+        value = t[key]
+        "#,
+        );
+
+        let value_ty = ws.expr_ty("value");
+        assert!(
+            matches!(value_ty, LuaType::Integer | LuaType::IntegerConst(_)),
+            "expected integer type, got {:?}",
+            value_ty
+        );
+    }
+
+    #[test]
+    fn test_table_expr_key_doc_const() {
+        let mut ws = VirtualWorkspace::new_with_init_std_lib();
+
+        ws.def(
+            r#"
+        ---@type 'field'
+        local key = "field"
+        local t = { [key] = 1 }
+        value = t[key]
+        "#,
+        );
+
+        let value_ty = ws.expr_ty("value");
+        assert!(
+            matches!(value_ty, LuaType::Integer | LuaType::IntegerConst(_)),
+            "expected integer type, got {:?}",
+            value_ty
+        );
     }
 }

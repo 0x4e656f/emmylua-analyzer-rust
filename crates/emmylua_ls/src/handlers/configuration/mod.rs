@@ -11,18 +11,31 @@ pub async fn on_did_change_configuration(
     let pretty_json = serde_json::to_string_pretty(&params).ok()?;
     log::info!("on_did_change_configuration: {}", pretty_json);
 
-    let config_manager = context.workspace_manager.read().await;
-    if config_manager.client_config.client_id.is_vscode() {
+    // Check initialization status and get client config
+    let (client_id, supports_config_request) = {
+        let workspace_manager = context.workspace_manager().read().await;
+        let client_id = workspace_manager.client_config.client_id;
+        let supports_config_request = context.lsp_features().supports_config_request();
+        (client_id, supports_config_request)
+    };
+
+    if client_id.is_vscode() {
         return Some(());
     }
-    let client_id = config_manager.client_config.client_id;
-    drop(config_manager);
 
-    let new_client_config = get_client_config(&context, client_id).await;
-    let mut config_manager = context.workspace_manager.write().await;
-    config_manager.client_config = new_client_config;
+    log::info!("change config client_id: {:?}", client_id);
 
-    config_manager.reload_workspace().await;
+    // Get new config without holding any locks
+    let new_client_config = get_client_config(&context, client_id, supports_config_request).await;
+
+    // Update config and reload - acquire write lock only when necessary
+    {
+        let mut workspace_manager = context.workspace_manager().write().await;
+        workspace_manager.client_config = new_client_config;
+        log::info!("reloading workspace folders");
+        workspace_manager.add_reload_workspace_task(context.clone());
+    }
+
     Some(())
 }
 

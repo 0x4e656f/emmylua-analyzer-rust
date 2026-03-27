@@ -12,7 +12,7 @@ pub use token::*;
 
 use crate::kind::LuaSyntaxKind;
 
-use super::{traits::LuaAstNode, LuaSyntaxNode};
+use super::{LuaSyntaxNode, traits::LuaAstNode};
 
 #[allow(unused)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -35,6 +35,7 @@ pub enum LuaAst {
     LuaFuncStat(LuaFuncStat),
     LuaLocalFuncStat(LuaLocalFuncStat),
     LuaReturnStat(LuaReturnStat),
+    LuaGlobalStat(LuaGlobalStat),
 
     // exprs
     LuaNameExpr(LuaNameExpr),
@@ -66,6 +67,7 @@ pub enum LuaAst {
     LuaDocTagType(LuaDocTagType),
     LuaDocTagParam(LuaDocTagParam),
     LuaDocTagReturn(LuaDocTagReturn),
+    LuaDocTagReturnOverload(LuaDocTagReturnOverload),
     LuaDocTagOverload(LuaDocTagOverload),
     LuaDocTagField(LuaDocTagField),
     LuaDocTagModule(LuaDocTagModule),
@@ -75,6 +77,7 @@ pub enum LuaAst {
     LuaDocTagVersion(LuaDocTagVersion),
     LuaDocTagCast(LuaDocTagCast),
     LuaDocTagSource(LuaDocTagSource),
+    LuaDocTagSchema(LuaDocTagSchema),
     LuaDocTagOther(LuaDocTagOther),
     LuaDocTagNamespace(LuaDocTagNamespace),
     LuaDocTagUsing(LuaDocTagUsing),
@@ -86,9 +89,16 @@ pub enum LuaAst {
     LuaDocTagAsync(LuaDocTagAsync),
     LuaDocTagAs(LuaDocTagAs),
     LuaDocTagReturnCast(LuaDocTagReturnCast),
+    LuaDocTagExport(LuaDocTagExport),
+    LuaDocTagLanguage(LuaDocTagLanguage),
+    LuaDocTagAttribute(LuaDocTagAttribute),
+    LuaDocTagAttributeUse(LuaDocTagAttributeUse),
+    // doc description
+    LuaDocDescription(LuaDocDescription),
 
     // doc type
     LuaDocNameType(LuaDocNameType),
+    LuaDocInferType(LuaDocInferType),
     LuaDocArrayType(LuaDocArrayType),
     LuaDocFuncType(LuaDocFuncType),
     LuaDocObjectType(LuaDocObjectType),
@@ -125,6 +135,7 @@ impl LuaAstNode for LuaAst {
             LuaAst::LuaFuncStat(node) => node.syntax(),
             LuaAst::LuaLocalFuncStat(node) => node.syntax(),
             LuaAst::LuaReturnStat(node) => node.syntax(),
+            LuaAst::LuaGlobalStat(node) => node.syntax(),
             LuaAst::LuaNameExpr(node) => node.syntax(),
             LuaAst::LuaIndexExpr(node) => node.syntax(),
             LuaAst::LuaTableExpr(node) => node.syntax(),
@@ -149,6 +160,7 @@ impl LuaAstNode for LuaAst {
             LuaAst::LuaDocTagType(node) => node.syntax(),
             LuaAst::LuaDocTagParam(node) => node.syntax(),
             LuaAst::LuaDocTagReturn(node) => node.syntax(),
+            LuaAst::LuaDocTagReturnOverload(node) => node.syntax(),
             LuaAst::LuaDocTagOverload(node) => node.syntax(),
             LuaAst::LuaDocTagField(node) => node.syntax(),
             LuaAst::LuaDocTagModule(node) => node.syntax(),
@@ -158,6 +170,7 @@ impl LuaAstNode for LuaAst {
             LuaAst::LuaDocTagVersion(node) => node.syntax(),
             LuaAst::LuaDocTagCast(node) => node.syntax(),
             LuaAst::LuaDocTagSource(node) => node.syntax(),
+            LuaAst::LuaDocTagSchema(node) => node.syntax(),
             LuaAst::LuaDocTagOther(node) => node.syntax(),
             LuaAst::LuaDocTagNamespace(node) => node.syntax(),
             LuaAst::LuaDocTagUsing(node) => node.syntax(),
@@ -169,7 +182,13 @@ impl LuaAstNode for LuaAst {
             LuaAst::LuaDocTagAsync(node) => node.syntax(),
             LuaAst::LuaDocTagAs(node) => node.syntax(),
             LuaAst::LuaDocTagReturnCast(node) => node.syntax(),
+            LuaAst::LuaDocTagExport(node) => node.syntax(),
+            LuaAst::LuaDocTagAttribute(node) => node.syntax(),
+            LuaAst::LuaDocTagAttributeUse(node) => node.syntax(),
+            LuaAst::LuaDocTagLanguage(node) => node.syntax(),
+            LuaAst::LuaDocDescription(node) => node.syntax(),
             LuaAst::LuaDocNameType(node) => node.syntax(),
+            LuaAst::LuaDocInferType(node) => node.syntax(),
             LuaAst::LuaDocArrayType(node) => node.syntax(),
             LuaAst::LuaDocFuncType(node) => node.syntax(),
             LuaAst::LuaDocObjectType(node) => node.syntax(),
@@ -190,91 +209,99 @@ impl LuaAstNode for LuaAst {
     where
         Self: Sized,
     {
-        match kind {
-            LuaSyntaxKind::Chunk => true,
-            LuaSyntaxKind::Block => true,
-            LuaSyntaxKind::AssignStat => true,
-            LuaSyntaxKind::LocalStat => true,
-            LuaSyntaxKind::CallExprStat => true,
-            LuaSyntaxKind::LabelStat => true,
-            LuaSyntaxKind::BreakStat => true,
-            LuaSyntaxKind::GotoStat => true,
-            LuaSyntaxKind::DoStat => true,
-            LuaSyntaxKind::WhileStat => true,
-            LuaSyntaxKind::RepeatStat => true,
-            LuaSyntaxKind::IfStat => true,
-            LuaSyntaxKind::ForStat => true,
-            LuaSyntaxKind::ForRangeStat => true,
-            LuaSyntaxKind::FuncStat => true,
-            LuaSyntaxKind::LocalFuncStat => true,
-            LuaSyntaxKind::ReturnStat => true,
-            LuaSyntaxKind::NameExpr => true,
-            LuaSyntaxKind::IndexExpr => true,
-            LuaSyntaxKind::TableEmptyExpr
-            | LuaSyntaxKind::TableArrayExpr
-            | LuaSyntaxKind::TableObjectExpr => true,
-            LuaSyntaxKind::BinaryExpr => true,
-            LuaSyntaxKind::UnaryExpr => true,
-            LuaSyntaxKind::ParenExpr => true,
-            LuaSyntaxKind::CallExpr
-            | LuaSyntaxKind::AssertCallExpr
-            | LuaSyntaxKind::ErrorCallExpr
-            | LuaSyntaxKind::RequireCallExpr
-            | LuaSyntaxKind::TypeCallExpr
-            | LuaSyntaxKind::SetmetatableCallExpr => true,
-            LuaSyntaxKind::LiteralExpr => true,
-            LuaSyntaxKind::ClosureExpr => true,
-            LuaSyntaxKind::ParamList => true,
-            LuaSyntaxKind::CallArgList => true,
-            LuaSyntaxKind::LocalName => true,
-            LuaSyntaxKind::TableFieldAssign | LuaSyntaxKind::TableFieldValue => true,
-            LuaSyntaxKind::ParamName => true,
-            LuaSyntaxKind::Attribute => true,
-            LuaSyntaxKind::ElseIfClauseStat => true,
-            LuaSyntaxKind::ElseClauseStat => true,
-            LuaSyntaxKind::Comment => true,
-            LuaSyntaxKind::DocTagClass => true,
-            LuaSyntaxKind::DocTagEnum => true,
-            LuaSyntaxKind::DocTagAlias => true,
-            LuaSyntaxKind::DocTagType => true,
-            LuaSyntaxKind::DocTagParam => true,
-            LuaSyntaxKind::DocTagReturn => true,
-            LuaSyntaxKind::DocTagOverload => true,
-            LuaSyntaxKind::DocTagField => true,
-            LuaSyntaxKind::DocTagModule => true,
-            LuaSyntaxKind::DocTagSee => true,
-            LuaSyntaxKind::DocTagDiagnostic => true,
-            LuaSyntaxKind::DocTagDeprecated => true,
-            LuaSyntaxKind::DocTagVersion => true,
-            LuaSyntaxKind::DocTagCast => true,
-            LuaSyntaxKind::DocTagSource => true,
-            LuaSyntaxKind::DocTagOther => true,
-            LuaSyntaxKind::DocTagNamespace => true,
-            LuaSyntaxKind::DocTagUsing => true,
-            LuaSyntaxKind::DocTagMeta => true,
-            LuaSyntaxKind::DocTagNodiscard => true,
-            LuaSyntaxKind::DocTagReadonly => true,
-            LuaSyntaxKind::DocTagOperator => true,
-            LuaSyntaxKind::DocTagGeneric => true,
-            LuaSyntaxKind::DocTagAsync => true,
-            LuaSyntaxKind::DocTagAs => true,
-            LuaSyntaxKind::DocTagReturnCast => true,
-            LuaSyntaxKind::TypeName => true,
-            LuaSyntaxKind::TypeArray => true,
-            LuaSyntaxKind::TypeFun => true,
-            LuaSyntaxKind::TypeObject => true,
-            LuaSyntaxKind::TypeBinary => true,
-            LuaSyntaxKind::TypeUnary => true,
-            LuaSyntaxKind::TypeConditional => true,
-            LuaSyntaxKind::TypeTuple => true,
-            LuaSyntaxKind::TypeLiteral => true,
-            LuaSyntaxKind::TypeVariadic => true,
-            LuaSyntaxKind::TypeNullable => true,
-            LuaSyntaxKind::TypeGeneric => true,
-            LuaSyntaxKind::TypeStringTemplate => true,
-            LuaSyntaxKind::TypeMultiLineUnion => true,
-            _ => false,
-        }
+        matches!(
+            kind,
+            LuaSyntaxKind::Chunk
+                | LuaSyntaxKind::Block
+                | LuaSyntaxKind::AssignStat
+                | LuaSyntaxKind::LocalStat
+                | LuaSyntaxKind::CallExprStat
+                | LuaSyntaxKind::LabelStat
+                | LuaSyntaxKind::BreakStat
+                | LuaSyntaxKind::GotoStat
+                | LuaSyntaxKind::DoStat
+                | LuaSyntaxKind::WhileStat
+                | LuaSyntaxKind::RepeatStat
+                | LuaSyntaxKind::IfStat
+                | LuaSyntaxKind::ForStat
+                | LuaSyntaxKind::ForRangeStat
+                | LuaSyntaxKind::FuncStat
+                | LuaSyntaxKind::LocalFuncStat
+                | LuaSyntaxKind::ReturnStat
+                | LuaSyntaxKind::GlobalStat
+                | LuaSyntaxKind::NameExpr
+                | LuaSyntaxKind::IndexExpr
+                | LuaSyntaxKind::TableEmptyExpr
+                | LuaSyntaxKind::TableArrayExpr
+                | LuaSyntaxKind::TableObjectExpr
+                | LuaSyntaxKind::BinaryExpr
+                | LuaSyntaxKind::UnaryExpr
+                | LuaSyntaxKind::ParenExpr
+                | LuaSyntaxKind::CallExpr
+                | LuaSyntaxKind::AssertCallExpr
+                | LuaSyntaxKind::ErrorCallExpr
+                | LuaSyntaxKind::RequireCallExpr
+                | LuaSyntaxKind::TypeCallExpr
+                | LuaSyntaxKind::SetmetatableCallExpr
+                | LuaSyntaxKind::LiteralExpr
+                | LuaSyntaxKind::ClosureExpr
+                | LuaSyntaxKind::ParamList
+                | LuaSyntaxKind::CallArgList
+                | LuaSyntaxKind::LocalName
+                | LuaSyntaxKind::TableFieldAssign
+                | LuaSyntaxKind::TableFieldValue
+                | LuaSyntaxKind::ParamName
+                | LuaSyntaxKind::Attribute
+                | LuaSyntaxKind::ElseIfClauseStat
+                | LuaSyntaxKind::ElseClauseStat
+                | LuaSyntaxKind::Comment
+                | LuaSyntaxKind::DocTagClass
+                | LuaSyntaxKind::DocTagEnum
+                | LuaSyntaxKind::DocTagAlias
+                | LuaSyntaxKind::DocTagType
+                | LuaSyntaxKind::DocTagParam
+                | LuaSyntaxKind::DocTagReturn
+                | LuaSyntaxKind::DocTagReturnOverload
+                | LuaSyntaxKind::DocTagOverload
+                | LuaSyntaxKind::DocTagField
+                | LuaSyntaxKind::DocTagModule
+                | LuaSyntaxKind::DocTagSee
+                | LuaSyntaxKind::DocTagDiagnostic
+                | LuaSyntaxKind::DocTagDeprecated
+                | LuaSyntaxKind::DocTagVersion
+                | LuaSyntaxKind::DocTagCast
+                | LuaSyntaxKind::DocTagSource
+                | LuaSyntaxKind::DocTagSchema
+                | LuaSyntaxKind::DocTagOther
+                | LuaSyntaxKind::DocTagNamespace
+                | LuaSyntaxKind::DocTagUsing
+                | LuaSyntaxKind::DocTagMeta
+                | LuaSyntaxKind::DocTagNodiscard
+                | LuaSyntaxKind::DocTagReadonly
+                | LuaSyntaxKind::DocTagOperator
+                | LuaSyntaxKind::DocTagGeneric
+                | LuaSyntaxKind::DocTagAsync
+                | LuaSyntaxKind::DocTagAs
+                | LuaSyntaxKind::DocTagReturnCast
+                | LuaSyntaxKind::DocTagExport
+                | LuaSyntaxKind::DocTagLanguage
+                | LuaSyntaxKind::TypeName
+                | LuaSyntaxKind::TypeInfer
+                | LuaSyntaxKind::TypeArray
+                | LuaSyntaxKind::TypeFun
+                | LuaSyntaxKind::TypeObject
+                | LuaSyntaxKind::TypeBinary
+                | LuaSyntaxKind::TypeUnary
+                | LuaSyntaxKind::TypeConditional
+                | LuaSyntaxKind::TypeTuple
+                | LuaSyntaxKind::TypeLiteral
+                | LuaSyntaxKind::TypeVariadic
+                | LuaSyntaxKind::TypeNullable
+                | LuaSyntaxKind::TypeGeneric
+                | LuaSyntaxKind::TypeStringTemplate
+                | LuaSyntaxKind::TypeMultiLineUnion
+                | LuaSyntaxKind::DocAttributeUse
+        )
     }
 
     fn cast(syntax: LuaSyntaxNode) -> Option<Self>
@@ -305,6 +332,7 @@ impl LuaAstNode for LuaAst {
                 LuaLocalFuncStat::cast(syntax).map(LuaAst::LuaLocalFuncStat)
             }
             LuaSyntaxKind::ReturnStat => LuaReturnStat::cast(syntax).map(LuaAst::LuaReturnStat),
+            LuaSyntaxKind::GlobalStat => LuaGlobalStat::cast(syntax).map(LuaAst::LuaGlobalStat),
             LuaSyntaxKind::NameExpr => LuaNameExpr::cast(syntax).map(LuaAst::LuaNameExpr),
             LuaSyntaxKind::IndexExpr => LuaIndexExpr::cast(syntax).map(LuaAst::LuaIndexExpr),
             LuaSyntaxKind::TableEmptyExpr
@@ -345,10 +373,16 @@ impl LuaAstNode for LuaAst {
             LuaSyntaxKind::DocTagClass => LuaDocTagClass::cast(syntax).map(LuaAst::LuaDocTagClass),
             LuaSyntaxKind::DocTagEnum => LuaDocTagEnum::cast(syntax).map(LuaAst::LuaDocTagEnum),
             LuaSyntaxKind::DocTagAlias => LuaDocTagAlias::cast(syntax).map(LuaAst::LuaDocTagAlias),
+            LuaSyntaxKind::DocTagAttribute => {
+                LuaDocTagAttribute::cast(syntax).map(LuaAst::LuaDocTagAttribute)
+            }
             LuaSyntaxKind::DocTagType => LuaDocTagType::cast(syntax).map(LuaAst::LuaDocTagType),
             LuaSyntaxKind::DocTagParam => LuaDocTagParam::cast(syntax).map(LuaAst::LuaDocTagParam),
             LuaSyntaxKind::DocTagReturn => {
                 LuaDocTagReturn::cast(syntax).map(LuaAst::LuaDocTagReturn)
+            }
+            LuaSyntaxKind::DocTagReturnOverload => {
+                LuaDocTagReturnOverload::cast(syntax).map(LuaAst::LuaDocTagReturnOverload)
             }
             LuaSyntaxKind::DocTagOverload => {
                 LuaDocTagOverload::cast(syntax).map(LuaAst::LuaDocTagOverload)
@@ -370,6 +404,9 @@ impl LuaAstNode for LuaAst {
             LuaSyntaxKind::DocTagCast => LuaDocTagCast::cast(syntax).map(LuaAst::LuaDocTagCast),
             LuaSyntaxKind::DocTagSource => {
                 LuaDocTagSource::cast(syntax).map(LuaAst::LuaDocTagSource)
+            }
+            LuaSyntaxKind::DocTagSchema => {
+                LuaDocTagSchema::cast(syntax).map(LuaAst::LuaDocTagSchema)
             }
             LuaSyntaxKind::DocTagOther => LuaDocTagOther::cast(syntax).map(LuaAst::LuaDocTagOther),
             LuaSyntaxKind::DocTagNamespace => {
@@ -394,7 +431,17 @@ impl LuaAstNode for LuaAst {
             LuaSyntaxKind::DocTagReturnCast => {
                 LuaDocTagReturnCast::cast(syntax).map(LuaAst::LuaDocTagReturnCast)
             }
+            LuaSyntaxKind::DocTagExport => {
+                LuaDocTagExport::cast(syntax).map(LuaAst::LuaDocTagExport)
+            }
+            LuaSyntaxKind::DocTagLanguage => {
+                LuaDocTagLanguage::cast(syntax).map(LuaAst::LuaDocTagLanguage)
+            }
+            LuaSyntaxKind::DocDescription => {
+                LuaDocDescription::cast(syntax).map(LuaAst::LuaDocDescription)
+            }
             LuaSyntaxKind::TypeName => LuaDocNameType::cast(syntax).map(LuaAst::LuaDocNameType),
+            LuaSyntaxKind::TypeInfer => LuaDocInferType::cast(syntax).map(LuaAst::LuaDocInferType),
             LuaSyntaxKind::TypeArray => LuaDocArrayType::cast(syntax).map(LuaAst::LuaDocArrayType),
             LuaSyntaxKind::TypeFun => LuaDocFuncType::cast(syntax).map(LuaAst::LuaDocFuncType),
             LuaSyntaxKind::TypeObject => {
@@ -425,6 +472,9 @@ impl LuaAstNode for LuaAst {
             }
             LuaSyntaxKind::TypeMultiLineUnion => {
                 LuaDocMultiLineUnionType::cast(syntax).map(LuaAst::LuaDocMultiLineUnionType)
+            }
+            LuaSyntaxKind::DocTagAttributeUse => {
+                LuaDocTagAttributeUse::cast(syntax).map(LuaAst::LuaDocTagAttributeUse)
             }
             _ => None,
         }

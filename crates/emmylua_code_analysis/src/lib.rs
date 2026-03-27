@@ -1,8 +1,11 @@
-#![deny(
-    clippy::unwrap_used,
-    clippy::unwrap_in_result,
-    clippy::panic,
-    clippy::panic_in_result_fn
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::unwrap_in_result,
+        clippy::panic,
+        clippy::panic_in_result_fn
+    )
 )]
 
 mod compilation;
@@ -24,8 +27,13 @@ pub use emmylua_codestyle::*;
 pub use locale::get_locale_code;
 use lsp_types::Uri;
 pub use profile::Profile;
+pub use resources::get_best_resources_dir;
+pub use resources::load_resource_from_include_dir;
 use resources::load_resource_std;
+use schema_to_emmylua::SchemaConverter;
 pub use semantic::*;
+use std::collections::HashMap;
+use std::str::FromStr;
 use std::{collections::HashSet, path::PathBuf, sync::Arc};
 pub use test_lib::VirtualWorkspace;
 use tokio_util::sync::CancellationToken;
@@ -45,7 +53,6 @@ pub struct EmmyLuaAnalysis {
     pub compilation: LuaCompilation,
     pub diagnostic: LuaDiagnostic,
     pub emmyrc: Arc<Emmyrc>,
-    lib_workspace_counter: u32,
 }
 
 impl EmmyLuaAnalysis {
@@ -55,7 +62,6 @@ impl EmmyLuaAnalysis {
             compilation: LuaCompilation::new(emmyrc.clone()),
             diagnostic: LuaDiagnostic::new(),
             emmyrc,
-            lib_workspace_counter: 2,
         }
     }
 
@@ -96,15 +102,18 @@ impl EmmyLuaAnalysis {
     }
 
     pub fn add_library_workspace(&mut self, root: PathBuf) {
+        let module_index = self.compilation.get_db_mut().get_module_index_mut();
         let id = WorkspaceId {
-            id: self.lib_workspace_counter,
+            id: module_index.next_library_workspace_id(),
         };
-        self.lib_workspace_counter += 1;
+        module_index.add_workspace_root(root, id);
+    }
 
+    pub fn clear_non_std_workspaces(&mut self) {
         self.compilation
             .get_db_mut()
             .get_module_index_mut()
-            .add_workspace_root(root, id);
+            .clear_non_std_workspaces();
     }
 
     pub fn update_file_by_uri(&mut self, uri: &Uri, text: Option<String>) -> Option<FileId> {
@@ -123,8 +132,23 @@ impl EmmyLuaAnalysis {
         Some(file_id)
     }
 
+    pub fn update_remote_file_by_uri(&mut self, uri: &Uri, text: Option<String>) -> FileId {
+        let is_removed = text.is_none();
+        let fid = self
+            .compilation
+            .get_db_mut()
+            .get_vfs_mut()
+            .set_remote_file_content(uri, text);
+
+        self.compilation.remove_index(vec![fid]);
+        if !is_removed {
+            self.compilation.update_index(vec![fid]);
+        }
+        fid
+    }
+
     pub fn update_file_by_path(&mut self, path: &PathBuf, text: Option<String>) -> Option<FileId> {
-        let uri = file_path_to_uri(&path)?;
+        let uri = file_path_to_uri(path)?;
         self.update_file_by_uri(&uri, text)
     }
 
@@ -203,6 +227,50 @@ impl EmmyLuaAnalysis {
         self.update_files_by_uri(files)
     }
 
+    pub fn reload_workspace_files(
+        &mut self,
+        files: Vec<(PathBuf, Option<String>)>,
+        open_files: Vec<(Uri, String)>,
+    ) -> Vec<Uri> {
+        let open_paths: HashSet<_> = open_files
+            .iter()
+            .filter_map(|(uri, _)| uri_to_file_path(uri))
+            .collect();
+        let mut kept_paths = open_paths.clone();
+        kept_paths.extend(files.iter().map(|(path, _)| path.clone()));
+
+        let stale_uris = {
+            let db = self.compilation.get_db();
+            let vfs = db.get_vfs();
+            let module_index = db.get_module_index();
+            vfs.get_all_local_file_ids()
+                .into_iter()
+                .filter(|file_id| !module_index.is_std(file_id))
+                .filter_map(|file_id| vfs.get_file_path(&file_id).cloned())
+                .filter(|path| !kept_paths.contains(path))
+                .filter_map(|path| file_path_to_uri(&path))
+                .collect::<Vec<_>>()
+        };
+        for uri in &stale_uris {
+            self.remove_file_by_uri(uri);
+        }
+
+        self.update_files_by_path(
+            files
+                .into_iter()
+                .filter(|(path, _)| !open_paths.contains(path))
+                .collect(),
+        );
+        self.update_files_by_uri(
+            open_files
+                .into_iter()
+                .map(|(uri, text)| (uri, Some(text)))
+                .collect(),
+        );
+        self.reindex();
+        stale_uris
+    }
+
     pub fn update_config(&mut self, config: Arc<Emmyrc>) {
         self.emmyrc = config.clone();
         self.compilation.update_config(config.clone());
@@ -223,15 +291,9 @@ impl EmmyLuaAnalysis {
     }
 
     pub fn reindex(&mut self) {
-        let module = self.compilation.get_db().get_module_index();
-        let std_file_ids = module.get_std_file_ids();
-        let main_file_ids = module.get_main_workspace_file_ids();
-        let lib_file_ids = module.get_lib_file_ids();
+        let file_ids = self.compilation.get_db().get_vfs().get_all_file_ids();
         self.compilation.clear_index();
-
-        self.compilation.update_index(std_file_ids);
-        self.compilation.update_index(lib_file_ids);
-        self.compilation.update_index(main_file_ids);
+        self.compilation.update_index(file_ids);
     }
 
     /// 清理文件系统中不再存在的文件
@@ -240,13 +302,19 @@ impl EmmyLuaAnalysis {
 
         // 获取所有当前在VFS中的文件
         let vfs = self.compilation.get_db().get_vfs();
-        for file_id in vfs.get_all_file_ids() {
-            if let Some(path) = vfs.get_file_path(&file_id) {
-                if !path.exists() {
-                    if let Some(uri) = file_path_to_uri(path) {
-                        files_to_remove.push(uri);
-                    }
-                }
+        for file_id in vfs.get_all_local_file_ids() {
+            if self
+                .compilation
+                .get_db()
+                .get_module_index()
+                .is_std(&file_id)
+            {
+                continue;
+            }
+            if let Some(path) = vfs.get_file_path(&file_id).filter(|path| !path.exists())
+                && let Some(uri) = file_path_to_uri(path)
+            {
+                files_to_remove.push(uri);
             }
         }
 
@@ -254,6 +322,96 @@ impl EmmyLuaAnalysis {
         for uri in files_to_remove {
             self.remove_file_by_uri(&uri);
         }
+    }
+
+    pub fn check_schema_update(&self) -> bool {
+        self.compilation
+            .get_db()
+            .get_json_schema_index()
+            .has_need_resolve_schemas()
+    }
+
+    pub async fn update_schema(&mut self) {
+        let urls = self
+            .compilation
+            .get_db()
+            .get_json_schema_index()
+            .get_need_resolve_schemas();
+        let mut url_contents = HashMap::new();
+        for url in urls {
+            if url.scheme() == "file" {
+                if let Ok(path) = url.to_file_path() {
+                    if path.exists() {
+                        let result = read_file_with_encoding(&path, "utf-8");
+                        if let Some(content) = result {
+                            url_contents.insert(url.clone(), content);
+                        } else {
+                            log::error!("Failed to read schema file: {:?}", url);
+                        }
+                    }
+                }
+            } else {
+                #[cfg(feature = "reqwest")]
+                {
+                    let result = reqwest::get(url.as_str()).await;
+                    if let Ok(response) = result {
+                        if let Ok(content) = response.text().await {
+                            url_contents.insert(url.clone(), content);
+                        } else {
+                            log::error!("Failed to read schema content from URL: {:?}", url);
+                        }
+                    } else {
+                        log::error!("Failed to fetch schema from URL: {:?}", url);
+                    }
+                }
+            }
+        }
+
+        if url_contents.is_empty() {
+            return;
+        }
+
+        let converter = SchemaConverter::new(true);
+        for (url, json_content) in url_contents {
+            match converter.convert_from_str(&json_content) {
+                Ok(convert_result) => {
+                    let uri = match Uri::from_str(url.as_str()) {
+                        Ok(uri) => uri,
+                        Err(e) => {
+                            log::error!("Failed to convert URL to URI {:?}: {}", url, e);
+                            continue;
+                        }
+                    };
+                    let file_id =
+                        self.update_remote_file_by_uri(&uri, Some(convert_result.annotation_text));
+                    if let Some(f) = self
+                        .compilation
+                        .get_db_mut()
+                        .get_json_schema_index_mut()
+                        .get_schema_file_mut(&url)
+                    {
+                        *f = JsonSchemaFile::Resolved(LuaTypeDeclId::local(
+                            file_id,
+                            &convert_result.root_type_name,
+                        ));
+                    }
+                }
+                Err(e) => {
+                    log::error!("Failed to convert schema from URL {:?}: {}", url, e);
+                }
+            }
+        }
+
+        self.compilation
+            .get_db_mut()
+            .get_json_schema_index_mut()
+            .reset_rest_schemas();
+    }
+}
+
+impl Default for EmmyLuaAnalysis {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

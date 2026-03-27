@@ -1,4 +1,5 @@
 mod infer_expr_semantic_decl;
+mod resolve_global_decl;
 mod semantic_decl_level;
 mod semantic_guard;
 
@@ -7,14 +8,15 @@ use crate::{
     TypeOps,
 };
 use emmylua_parser::{
-    LuaAstNode, LuaAstToken, LuaDocNameType, LuaDocTag, LuaExpr, LuaLocalName, LuaSyntaxKind,
-    LuaSyntaxNode, LuaSyntaxToken, LuaTableField,
+    LuaAstNode, LuaAstToken, LuaDocNameType, LuaDocTag, LuaExpr, LuaLocalName, LuaParamName,
+    LuaSyntaxKind, LuaSyntaxNode, LuaSyntaxToken, LuaTableField,
 };
-use infer_expr_semantic_decl::infer_expr_semantic_decl;
+pub use infer_expr_semantic_decl::infer_expr_semantic_decl;
+pub use resolve_global_decl::resolve_global_decl_id;
 pub use semantic_decl_level::SemanticDeclLevel;
-use semantic_guard::SemanticDeclGuard;
+pub use semantic_guard::SemanticDeclGuard;
 
-use super::{infer_expr, LuaInferCache};
+use super::{LuaInferCache, infer_expr};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SemanticInfo {
@@ -49,7 +51,7 @@ pub fn infer_token_semantic_info(
                 LuaDeclExtra::Param {
                     idx, signature_id, ..
                 } => {
-                    let signature = db.get_signature_index().get(&signature_id)?;
+                    let signature = db.get_signature_index().get(signature_id)?;
                     let param_info = signature.get_param_info_by_id(*idx)?;
                     let mut typ = param_info.type_ref.clone();
                     if param_info.nullable && !typ.is_nullable() {
@@ -135,7 +137,7 @@ pub fn infer_node_semantic_info(
                         semantic_decl: Some(LuaSemanticDeclId::Member(member_id)),
                     })
                 }
-                _ => return None,
+                _ => None,
             }
         }
         _ => None,
@@ -212,12 +214,17 @@ pub fn infer_node_semantic_decl(
                     let member_id = LuaMemberId::new(field.get_syntax_id(), cache.get_file_id());
                     Some(LuaSemanticDeclId::Member(member_id))
                 }
-                _ => return None,
+                _ => None,
             }
         }
         local_name if LuaLocalName::can_cast(local_name.kind().into()) => {
             let local_name = LuaLocalName::cast(local_name)?;
             let name_token = local_name.get_name_token()?;
+            infer_token_semantic_decl(db, cache, name_token.syntax().clone(), level)
+        }
+        param_name if LuaParamName::can_cast(param_name.kind().into()) => {
+            let param_name = LuaParamName::cast(param_name)?;
+            let name_token = param_name.get_name_token()?;
             infer_token_semantic_decl(db, cache, name_token.syntax().clone(), level)
         }
         _ => None,

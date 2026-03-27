@@ -36,6 +36,14 @@ function assert(v, ...) end
 ---| "generational" # Change the collector mode to generational. This option can be followed by two numbers: the garbage-collector minor multiplier and the major multiplier.
 ---| "isrunning" # returns a boolean that tells whether the collector is running (i.e., not stopped).
 
+---@alias std.collectgarbage.param
+---| "minormul" # minor multiplier
+---| "majorminor" # major/minor ratio
+---| "minormajor" # minor/major ratio
+---| "pause" # collector pause
+---| "stepmul" # step multiplier
+---| "stepsize" # step size
+
 ---
 --- This function is a generic interface to the garbage collector. It performs
 --- different functions according to its first argument, `opt`:
@@ -63,6 +71,7 @@ function assert(v, ...) end
 --- the major multiplier.
 --- **"isrunning"**: returns a boolean that tells whether the collector is
 --- running (i.e., not stopped).
+---@overload fun(opt: "param", param: std.collectgarbage.param, value: integer): integer
 ---@param opt? std.collectgarbage_opt
 ---@param ... any
 ---@return any
@@ -75,7 +84,7 @@ function collectgarbage(opt, ...) end
 --- `dofile` propagates the error to its caller (that is, `dofile` does not run
 --- in protected mode).
 ---@param filename? string
----@return table
+---@return any ...
 function dofile(filename) end
 
 ---
@@ -151,7 +160,7 @@ function ipairs(t) end
 ---
 --- Lua does not check the consistency of binary chunks. Maliciously crafted
 --- binary chunks can crash the interpreter.
----@param chunk (fun(...:any):string) | string
+---@param chunk (fun(...:any):string) | Language<"Lua">
 ---@param chunkname? string
 ---@param mode? std.loadmode
 ---@param env? table
@@ -164,9 +173,8 @@ function load(chunk, chunkname, mode, env) end
 ---
 ---Loads a chunk from the given string.
 ---
----
 ---@version 5.1, JIT
----@param text       string
+---@param text       Language<"Lua">
 ---@param chunkname? string
 ---@return function? chunk
 ---@return string?   error_message
@@ -233,10 +241,11 @@ function next(table, index) end
 ---
 --- See function `next` for the caveats of modifying the table during its
 --- traversal.
----@generic K, V
+---@generic K, V, I
 ---@param t table<K, V> | V[] | {[K]: V}
----@return fun(tbl: any):K, V
+---@return (fun(tbl: table<I, V>, index: I?):K, V), table<I, V>, I?
 function pairs(t) end
+
 ---
 --- Calls function `f` with the given arguments in *protected mode*. This
 --- means that any error inside `f` is not propagated; instead, `pcall` catches
@@ -244,10 +253,11 @@ function pairs(t) end
 --- boolean), which is true if the call succeeds without errors. In such case,
 --- `pcall` also returns all results from the call, after this first result. In
 --- case of any error, `pcall` returns **false** plus the error message.
----@generic T, R, R1
----@param f fun(...: T...): R1, R...
+---@generic T, R
+---@param f sync fun(...: T...): R...
 ---@param ... T...
----@return boolean, R1|string, R...
+---@return_overload true, R...
+---@return_overload false, string
 function pcall(f, ...) end
 
 ---
@@ -271,7 +281,7 @@ function rawequal(v1, v2) end
 --- must be a table; `index` may be any value.
 ---@generic T, K
 ---@param table T
----@param index K
+---@param index std.ConstTpl<K>
 ---@return std.RawGet<T, K>
 function rawget(table, index) end
 
@@ -290,6 +300,7 @@ function rawlen(v) end
 ---@param table table
 ---@param index any
 ---@param value any
+---@return table
 function rawset(table, index, value) end
 
 ---
@@ -332,11 +343,10 @@ function require(modname) end
 --- Otherwise, `index` must be the string "#", and `select` returns
 --- the total number of extra arguments it received.
 ---@generic T, Num: integer | '#'
----@param index Num
+---@param index std.ConstTpl<Num>
 ---@param ... T...
 ---@return std.Select<T..., Num>
 function select(index, ...) end
-
 
 ---@class std.metatable
 ---@field __mode? 'v'|'k'|'kv'
@@ -377,9 +387,10 @@ function select(index, ...) end
 --- metatable has a `"__metatable"` field, raises an error.
 ---
 --- This function returns `table`.
----@param table table
+---@generic T: table
+---@param table T
 ---@param metatable std.metatable|table|nil
----@return table
+---@return T
 function setmetatable(table, metatable) end
 
 ---
@@ -436,30 +447,39 @@ function type(v) end
 
 ---
 --- A global variable (not a function) that holds a string containing the
---- running Lua version. The current value of this variable is "`Lua 5.3`".
-_VERSION = "Lua 5.4"
+--- running Lua version. The current value of this variable is "`Lua 5.5`".
+_VERSION = "Lua 5.5"
 
 ---
 --- This function is similar to `pcall`, except that it sets a new message
 --- handler `msgh`.
 ---@generic T, R
----@param f fun(...:T...): R...
----@param msgh fun(err:string):void
+---@param f sync fun(...:T...): R...
+---@param msgh fun(err:any):any
 ---@param ... T...
 ---@return boolean, R...
 function xpcall(f, msgh, ...) end
 
 ---@version 5.1, JIT
+---
 ---@generic T, Start: integer, End: integer
----@param i? Start
----@param j? End
+---@param i? std.ConstTpl<Start>
+---@param j? std.ConstTpl<End>
 ---@param list T
 ---@return std.Unpack<T, Start, End>
 function unpack(list, i, j) end
 
 ---@version > 5.4
----@param message string
-function warn(message) end
+---
+--- Emits a warning with a message composed by the concatenation of all its arguments (which should be strings).
+---
+--- By convention, a one-piece message starting with '@' is intended to be a control message,
+--- which is a message to the warning system itself. In particular,
+--- the standard warning function in Lua recognizes the control messages "@off", to stop the emission of warnings,
+--- and "@on", to (re)start the emission; it ignores unknown control messages.
+---@param msg1 string|number
+---@param ... string|number
+function warn(msg1, ...) end
 
 ---@type string[]
 arg = {}
@@ -472,12 +492,14 @@ _ENV = {}
 
 
 ---@version 5.1, JIT
+---
 --- Sets the environment for the specified function.
 ---@param f function|integer The function for which the environment is to be set.
 ---@param env table The environment table to assign to the function.
 function setfenv(f, env) end
 
 ---@version 5.1, JIT
+---
 --- Retrieves the environment table of the specified function.
 ---@param f function|integer The function whose environment is to be retrieved.
 ---@return table The environment table associated with the given function.

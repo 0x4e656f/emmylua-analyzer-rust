@@ -23,30 +23,45 @@ fn parse_docs(p: &mut LuaDocParser) {
     while p.current_token() != LuaTokenKind::TkEof {
         match p.current_token() {
             LuaTokenKind::TkDocStart => {
-                p.set_state(LuaDocLexerState::Tag);
+                p.set_lexer_state(LuaDocLexerState::Tag);
                 p.bump();
                 parse_tag(p);
             }
             LuaTokenKind::TkDocLongStart => {
-                p.set_state(LuaDocLexerState::Tag);
+                p.set_lexer_state(LuaDocLexerState::Tag);
                 p.bump();
                 parse_long_tag(p);
             }
             LuaTokenKind::TkNormalStart => {
-                p.set_state(LuaDocLexerState::NormalDescription);
+                p.set_lexer_state(LuaDocLexerState::NormalDescription);
+                let mut m = p.mark(LuaSyntaxKind::DocDescription);
+
                 p.bump();
+
+                if_token_bump(p, LuaTokenKind::TkWhitespace);
 
                 if matches!(
                     p.current_token(),
                     LuaTokenKind::TkDocRegion | LuaTokenKind::TkDocEndRegion
                 ) {
+                    m.undo(p);
+                    p.bump();
+                    m = p.mark(LuaSyntaxKind::DocDescription);
+                }
+
+                while let LuaTokenKind::TkDocDetail
+                | LuaTokenKind::TkEndOfLine
+                | LuaTokenKind::TkWhitespace
+                | LuaTokenKind::TkDocContinue
+                | LuaTokenKind::TkNormalStart = p.current_token()
+                {
                     p.bump();
                 }
 
-                parse_normal_description(p);
+                m.complete(p);
             }
             LuaTokenKind::TkLongCommentStart => {
-                p.set_state(LuaDocLexerState::LongDescription);
+                p.set_lexer_state(LuaDocLexerState::LongDescription);
                 p.bump();
 
                 parse_description(p);
@@ -59,38 +74,31 @@ fn parse_docs(p: &mut LuaDocParser) {
             }
         }
 
-        if let Some(reader) = &p.lexer.reader {
-            if !reader.is_eof()
-                && !matches!(
-                    p.current_token(),
-                    LuaTokenKind::TkDocStart | LuaTokenKind::TkDocLongStart
-                )
-            {
-                p.bump_to_end();
-                continue;
-            }
+        if let Some(reader) = &p.lexer.reader
+            && !reader.is_eof()
+            && !matches!(
+                p.current_token(),
+                LuaTokenKind::TkDocStart | LuaTokenKind::TkDocLongStart
+            )
+        {
+            p.bump_to_end();
+            continue;
         }
 
-        p.set_state(LuaDocLexerState::Init);
+        p.set_lexer_state(LuaDocLexerState::Init);
     }
 }
 
 fn parse_description(p: &mut LuaDocParser) {
     let m = p.mark(LuaSyntaxKind::DocDescription);
 
-    loop {
-        match p.current_token() {
-            LuaTokenKind::TkDocDetail
-            | LuaTokenKind::TkEndOfLine
-            | LuaTokenKind::TkWhitespace
-            | LuaTokenKind::TkDocContinue
-            | LuaTokenKind::TkNormalStart => {
-                p.bump();
-            }
-            _ => {
-                break;
-            }
-        }
+    while let LuaTokenKind::TkDocDetail
+    | LuaTokenKind::TkEndOfLine
+    | LuaTokenKind::TkWhitespace
+    | LuaTokenKind::TkDocContinue
+    | LuaTokenKind::TkNormalStart = p.current_token()
+    {
+        p.bump();
     }
 
     m.complete(p);
@@ -119,25 +127,4 @@ fn if_token_bump(p: &mut LuaDocParser, token: LuaTokenKind) -> bool {
     } else {
         false
     }
-}
-
-fn parse_normal_description(p: &mut LuaDocParser) {
-    let m = p.mark(LuaSyntaxKind::DocDescription);
-
-    loop {
-        match p.current_token() {
-            LuaTokenKind::TkDocDetail
-            | LuaTokenKind::TkEndOfLine
-            | LuaTokenKind::TkWhitespace
-            | LuaTokenKind::TkDocContinue
-            | LuaTokenKind::TkNormalStart => {
-                p.bump();
-            }
-            _ => {
-                break;
-            }
-        }
-    }
-
-    m.complete(p);
 }

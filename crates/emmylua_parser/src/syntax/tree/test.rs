@@ -1,6 +1,8 @@
 #[cfg(test)]
 mod test {
-    use crate::{set_locale, LuaAstNode, LuaLanguageLevel, LuaParser, ParserConfig};
+    use crate::{
+        LuaAstNode, LuaLanguageLevel, LuaNonStdSymbolSet, LuaParser, ParserConfig, set_locale,
+    };
     // use std::time::Instant;
     use std::{collections::HashMap, thread};
 
@@ -36,7 +38,13 @@ mod test {
 if a ~= b then
 end
         "#;
-        let parse_config = ParserConfig::new(LuaLanguageLevel::Lua51, None, HashMap::new());
+        let parse_config = ParserConfig::new(
+            LuaLanguageLevel::Lua51,
+            None,
+            HashMap::new(),
+            LuaNonStdSymbolSet::new(),
+            false,
+        );
         let tree = LuaParser::parse(code, parse_config);
         assert_eq!(tree.get_errors().len(), 0);
     }
@@ -78,5 +86,24 @@ local t
         "#;
 
         let _ = LuaParser::parse(code, ParserConfig::default());
+    }
+
+    #[test]
+    fn test_without_emmylua() {
+        let code = r#"
+        ---@param key string
+        ---@return boolean
+        local t
+        "#;
+
+        let c = ParserConfig::new(
+            LuaLanguageLevel::Lua54,
+            None,
+            HashMap::new(),
+            LuaNonStdSymbolSet::new(),
+            false,
+        );
+        let t = LuaParser::parse(code, c);
+        println!("{:#?}", t.get_red_root());
     }
 }

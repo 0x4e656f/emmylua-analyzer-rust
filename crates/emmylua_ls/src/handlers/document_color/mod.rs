@@ -18,7 +18,7 @@ pub async fn on_document_color(
     _: CancellationToken,
 ) -> Vec<ColorInformation> {
     let uri = params.text_document.uri;
-    let analysis = context.analysis.read().await;
+    let analysis = context.analysis().read().await;
     let file_id = if let Some(file_id) = analysis.get_file_id(&uri) {
         file_id
     } else {
@@ -47,7 +47,7 @@ pub async fn on_document_color_presentation(
     _: CancellationToken,
 ) -> Vec<ColorPresentation> {
     let uri = params.text_document.uri;
-    let analysis = context.analysis.read().await;
+    let analysis = context.analysis().read().await;
     let file_id = if let Some(file_id) = analysis.get_file_id(&uri) {
         file_id
     } else {
@@ -62,7 +62,7 @@ pub async fn on_document_color_presentation(
         };
     let document = semantic_model.get_document();
 
-    let range = if let Some(range) = document.to_rowan_range(params.range.clone()) {
+    let range = if let Some(range) = document.to_rowan_range(params.range) {
         range
     } else {
         return vec![];

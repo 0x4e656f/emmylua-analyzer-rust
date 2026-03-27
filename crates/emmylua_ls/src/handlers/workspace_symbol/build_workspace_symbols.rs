@@ -2,6 +2,15 @@ use emmylua_code_analysis::{DbIndex, LuaCompilation, LuaSemanticDeclId, LuaType}
 use lsp_types::{OneOf, SymbolKind, SymbolTag, WorkspaceSymbol, WorkspaceSymbolResponse};
 use tokio_util::sync::CancellationToken;
 
+/// if query contains uppercase, do case-sensitive match; otherwise, ignore case
+fn match_symbol(text: &str, query: &str) -> bool {
+    if query.chars().any(|c| c.is_uppercase()) {
+        text.contains(query)
+    } else {
+        text.to_lowercase().contains(&query.to_lowercase())
+    }
+}
+
 pub fn build_workspace_symbols(
     compilation: &LuaCompilation,
     query: String,
@@ -32,10 +41,10 @@ fn add_global_variable_symbols(
             return None;
         }
 
-        if decl.get_name().contains(query) {
+        if match_symbol(decl.get_name(), query) {
             let typ = db
                 .get_type_index()
-                .get_type_cache(&decl_id.clone().into())
+                .get_type_cache(&decl_id.into())
                 .map(|cache| cache.as_type())
                 .unwrap_or(&LuaType::Unknown);
             let property_owner_id = LuaSemanticDeclId::LuaDecl(decl_id);
@@ -78,7 +87,7 @@ fn add_type_symbols(
             return None;
         }
 
-        if typ.get_full_name().contains(query) {
+        if match_symbol(typ.get_full_name(), query) {
             let property_owner_id = LuaSemanticDeclId::TypeDecl(typ.get_id());
             let location = typ.get_locations().first()?;
             let document = db.get_vfs().get_document(&location.file_id)?;
@@ -116,11 +125,5 @@ fn get_symbol_kind(typ: &LuaType) -> SymbolKind {
 
 fn is_deprecated(db: &DbIndex, id: LuaSemanticDeclId) -> bool {
     let property = db.get_property_index().get_property(&id);
-    if let Some(property) = property {
-        if property.deprecated.is_some() {
-            return true;
-        }
-    }
-
-    false
+    property.is_some_and(|prop| prop.deprecated().is_some())
 }

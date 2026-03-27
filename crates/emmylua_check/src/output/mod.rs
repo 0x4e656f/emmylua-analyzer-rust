@@ -1,4 +1,5 @@
 mod json_output_writer;
+mod sarif_output_writer;
 mod text_output_writer;
 
 use std::path::PathBuf;
@@ -11,11 +12,14 @@ use crate::cmd_args::{OutputDestination, OutputFormat};
 
 use crate::terminal_display::TerminalDisplay;
 
+/// Type alias for diagnostic result channel
+type DiagnosticReceiver = Receiver<(FileId, Option<Vec<Diagnostic>>)>;
+
 pub async fn output_result(
     total_count: usize,
     db: &DbIndex,
     workspace: PathBuf,
-    mut receiver: Receiver<(FileId, Option<Vec<Diagnostic>>)>,
+    mut receiver: DiagnosticReceiver,
     output_format: OutputFormat,
     output: OutputDestination,
     warnings_as_errors: bool,
@@ -25,6 +29,7 @@ pub async fn output_result(
         OutputFormat::Text => {
             Box::new(text_output_writer::TextOutputWriter::new(workspace.clone()))
         }
+        OutputFormat::Sarif => Box::new(sarif_output_writer::SarifOutputWriter::new(output)),
     };
 
     let terminal_display = TerminalDisplay::new(workspace);
@@ -74,11 +79,7 @@ pub async fn output_result(
         terminal_display.print_summary(error_count, warning_count, info_count, hint_count);
     }
 
-    if has_error {
-        1
-    } else {
-        0
-    }
+    if has_error { 1 } else { 0 }
 }
 
 trait OutputWriter {

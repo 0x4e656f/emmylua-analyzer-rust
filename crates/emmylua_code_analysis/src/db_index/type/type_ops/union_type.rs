@@ -1,12 +1,26 @@
 use std::ops::Deref;
 
-use crate::{LuaType, LuaUnionType};
+use crate::{DbIndex, LuaType, LuaUnionType, get_real_type};
 
-pub fn union_type(source: LuaType, target: LuaType) -> LuaType {
-    match (&source, &target) {
+pub fn union_type(db: &DbIndex, source: LuaType, target: LuaType) -> LuaType {
+    let match_source = get_real_type(db, &source)
+        .cloned()
+        .unwrap_or_else(|| source.clone());
+    union_type_impl(&match_source, source, target)
+}
+
+pub(crate) fn union_type_shallow(source: LuaType, target: LuaType) -> LuaType {
+    let match_source = source.clone();
+    union_type_impl(&match_source, source, target)
+}
+
+fn union_type_impl(match_source: &LuaType, source: LuaType, target: LuaType) -> LuaType {
+    match (match_source, &target) {
         // ANY | T = ANY
         (LuaType::Any, _) => LuaType::Any,
         (_, LuaType::Any) => LuaType::Any,
+        (LuaType::Never, _) => target,
+        (_, LuaType::Never) => source,
         (LuaType::Unknown, _) => target,
         (_, LuaType::Unknown) => source,
         // int | int const
@@ -23,11 +37,14 @@ pub fn union_type(source: LuaType, target: LuaType) -> LuaType {
         (LuaType::String, LuaType::StringConst(_) | LuaType::DocStringConst(_)) => LuaType::String,
         (LuaType::StringConst(_) | LuaType::DocStringConst(_), LuaType::String) => LuaType::String,
         // boolean | boolean const
-        (LuaType::Boolean, LuaType::BooleanConst(_)) => LuaType::Boolean,
-        (LuaType::BooleanConst(_), LuaType::Boolean) => LuaType::Boolean,
-        (LuaType::BooleanConst(left), LuaType::BooleanConst(right)) => {
+        (LuaType::Boolean, right) if right.is_boolean() => LuaType::Boolean,
+        (left, LuaType::Boolean) if left.is_boolean() => LuaType::Boolean,
+        (
+            LuaType::BooleanConst(left) | LuaType::DocBooleanConst(left),
+            LuaType::BooleanConst(right) | LuaType::DocBooleanConst(right),
+        ) => {
             if left == right {
-                LuaType::BooleanConst(left.clone())
+                source.clone()
             } else {
                 LuaType::Boolean
             }
@@ -43,50 +60,63 @@ pub fn union_type(source: LuaType, target: LuaType) -> LuaType {
             if id1 == id2 {
                 source.clone()
             } else {
-                // Create a union of two class references
-                LuaType::Union(LuaUnionType::new(vec![source.clone(), target.clone()]).into())
+                LuaType::from_vec(vec![source.clone(), target.clone()])
             }
+        }
+        (LuaType::MultiLineUnion(left), right) => {
+            let include = match right {
+                LuaType::StringConst(v) => {
+                    left.get_unions().iter().any(|(t, _)| match (t, right) {
+                        (LuaType::DocStringConst(a), _) => a == v,
+                        _ => false,
+                    })
+                }
+                LuaType::IntegerConst(v) => {
+                    left.get_unions().iter().any(|(t, _)| match (t, right) {
+                        (LuaType::DocIntegerConst(a), _) => a == v,
+                        _ => false,
+                    })
+                }
+                _ => false,
+            };
+
+            if include {
+                return source;
+            }
+            LuaType::from_vec(vec![source, target])
         }
         // union
         (LuaType::Union(left), right) if !right.is_union() => {
             let left = left.deref().clone();
-            let mut types = left
-                .get_types()
-                .iter()
-                .map(|it| it.clone())
-                .collect::<Vec<_>>();
-            types.dedup();
-            types.push(right.clone());
+            let mut types = left.into_vec();
+            if types.contains(right) {
+                return source.clone();
+            }
 
-            LuaType::Union(LuaUnionType::new(types).into())
+            types.push(right.clone());
+            LuaType::Union(LuaUnionType::from_vec(types).into())
         }
         (left, LuaType::Union(right)) if !left.is_union() => {
             let right = right.deref().clone();
-            let mut types = right
-                .get_types()
-                .iter()
-                .map(|it| it.clone())
-                .collect::<Vec<_>>();
-            types.push(left.clone());
-            types.dedup();
-            LuaType::Union(LuaUnionType::new(types).into())
+            let mut types = right.into_vec();
+            if types.contains(left) {
+                return target.clone();
+            }
+
+            types.push(source.clone());
+            LuaType::Union(LuaUnionType::from_vec(types).into())
         }
         // two union
         (LuaType::Union(left), LuaType::Union(right)) => {
-            let left = left.deref().clone();
-            let right = right.deref().clone();
-            let mut types = left
-                .get_types()
-                .iter()
-                .map(|it| it.clone())
-                .collect::<Vec<_>>();
-            types.extend(right.get_types().iter().map(|it| it.clone()));
-            types.dedup();
-            LuaType::Union(LuaUnionType::new(types).into())
+            let mut left = left.into_vec();
+            let right = right.into_vec();
+            left.extend(right);
+
+            LuaType::from_vec(left)
         }
 
         // same type
-        (left, right) if left == right => source.clone(),
-        _ => LuaType::Union(LuaUnionType::new(vec![source, target]).into()),
+        (left, right) if *left == *right => source.clone(),
+        _ => LuaType::from_vec(vec![source, target]),
     }
 }

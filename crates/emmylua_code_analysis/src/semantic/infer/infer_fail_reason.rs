@@ -1,6 +1,6 @@
 use emmylua_parser::LuaExpr;
 
-use crate::{InFiled, LuaDeclId, LuaMemberId, LuaSignatureId};
+use crate::{FileId, InFiled, LuaDeclId, LuaMemberId, LuaSignatureId, LuaTypeDeclId};
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash)]
 pub enum InferFailReason {
@@ -10,18 +10,24 @@ pub enum InferFailReason {
     UnResolveSignatureReturn(LuaSignatureId),
     FieldNotFound,
     UnResolveDeclType(LuaDeclId),
+    UnResolveTypeDecl(LuaTypeDeclId),
     UnResolveMemberType(LuaMemberId),
+    UnResolveOperatorCall,
+    UnResolveModuleExport(FileId),
 }
 
 impl InferFailReason {
     pub fn is_need_resolve(&self) -> bool {
-        match self {
+        matches!(
+            self,
             InferFailReason::UnResolveExpr(_)
-            | InferFailReason::UnResolveSignatureReturn(_)
-            | InferFailReason::FieldNotFound
-            | InferFailReason::UnResolveDeclType(_)
-            | InferFailReason::UnResolveMemberType(_) => true,
-            _ => false,
-        }
+                | InferFailReason::UnResolveSignatureReturn(_)
+                | InferFailReason::FieldNotFound
+                | InferFailReason::UnResolveDeclType(_)
+                | InferFailReason::UnResolveTypeDecl(_)
+                | InferFailReason::UnResolveMemberType(_)
+                | InferFailReason::UnResolveOperatorCall
+                | InferFailReason::UnResolveModuleExport(_)
+        )
     }
 }

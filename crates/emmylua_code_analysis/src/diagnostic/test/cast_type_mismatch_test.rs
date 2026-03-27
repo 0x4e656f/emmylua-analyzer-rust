@@ -185,7 +185,7 @@ mod tests {
                         return value, math.type(value)
                     end
                     return value, tp
-                end 
+                end
             "#
         ));
     }
@@ -230,6 +230,18 @@ mod tests {
                 local key
 
                 ---@cast key IdAndKeyAlias
+            "#
+        ));
+    }
+
+    #[test]
+    fn test_issue_565() {
+        let mut ws = VirtualWorkspace::new();
+        assert!(ws.check_code_for(
+            DiagnosticCode::CastTypeMismatch,
+            r#"
+                local a --- @type table?
+                --- @cast a [integer,integer]?
             "#
         ));
     }

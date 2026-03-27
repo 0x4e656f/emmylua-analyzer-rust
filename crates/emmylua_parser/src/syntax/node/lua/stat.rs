@@ -1,16 +1,16 @@
 use crate::{
-    kind::{LuaSyntaxKind, LuaTokenKind},
+    LuaAstToken, LuaGeneralToken, LuaLocalAttribute, LuaSyntaxNode, LuaTokenKind,
+    kind::LuaSyntaxKind,
     syntax::{
+        LuaCommentOwner,
         node::LuaNameToken,
         traits::{LuaAstChildren, LuaAstNode, LuaAstTokenChildren},
-        LuaCommentOwner,
     },
-    LuaSyntaxNode,
 };
 
 use super::{
-    expr::{LuaCallExpr, LuaClosureExpr, LuaExpr, LuaVarExpr},
     LuaBlock, LuaLocalName,
+    expr::{LuaCallExpr, LuaClosureExpr, LuaExpr, LuaVarExpr},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -31,6 +31,7 @@ pub enum LuaStat {
     GotoStat(LuaGotoStat),
     LabelStat(LuaLabelStat),
     EmptyStat(LuaEmptyStat),
+    GlobalStat(LuaGlobalStat),
 }
 
 impl LuaAstNode for LuaStat {
@@ -52,6 +53,7 @@ impl LuaAstNode for LuaStat {
             LuaStat::GotoStat(node) => node.syntax(),
             LuaStat::LabelStat(node) => node.syntax(),
             LuaStat::EmptyStat(node) => node.syntax(),
+            LuaStat::GlobalStat(node) => node.syntax(),
         }
     }
 
@@ -59,25 +61,26 @@ impl LuaAstNode for LuaStat {
     where
         Self: Sized,
     {
-        match kind {
-            LuaSyntaxKind::LocalStat => true,
-            LuaSyntaxKind::AssignStat => true,
-            LuaSyntaxKind::CallExprStat => true,
-            LuaSyntaxKind::FuncStat => true,
-            LuaSyntaxKind::LocalFuncStat => true,
-            LuaSyntaxKind::IfStat => true,
-            LuaSyntaxKind::WhileStat => true,
-            LuaSyntaxKind::DoStat => true,
-            LuaSyntaxKind::ForStat => true,
-            LuaSyntaxKind::ForRangeStat => true,
-            LuaSyntaxKind::RepeatStat => true,
-            LuaSyntaxKind::BreakStat => true,
-            LuaSyntaxKind::ReturnStat => true,
-            LuaSyntaxKind::GotoStat => true,
-            LuaSyntaxKind::LabelStat => true,
-            LuaSyntaxKind::EmptyStat => true,
-            _ => false,
-        }
+        matches!(
+            kind,
+            LuaSyntaxKind::LocalStat
+                | LuaSyntaxKind::AssignStat
+                | LuaSyntaxKind::CallExprStat
+                | LuaSyntaxKind::FuncStat
+                | LuaSyntaxKind::LocalFuncStat
+                | LuaSyntaxKind::IfStat
+                | LuaSyntaxKind::WhileStat
+                | LuaSyntaxKind::DoStat
+                | LuaSyntaxKind::ForStat
+                | LuaSyntaxKind::ForRangeStat
+                | LuaSyntaxKind::RepeatStat
+                | LuaSyntaxKind::BreakStat
+                | LuaSyntaxKind::ReturnStat
+                | LuaSyntaxKind::GotoStat
+                | LuaSyntaxKind::LabelStat
+                | LuaSyntaxKind::EmptyStat
+                | LuaSyntaxKind::GlobalStat
+        )
     }
 
     fn cast(syntax: LuaSyntaxNode) -> Option<Self>
@@ -107,6 +110,7 @@ impl LuaAstNode for LuaStat {
             LuaSyntaxKind::GotoStat => Some(LuaStat::GotoStat(LuaGotoStat::cast(syntax)?)),
             LuaSyntaxKind::LabelStat => Some(LuaStat::LabelStat(LuaLabelStat::cast(syntax)?)),
             LuaSyntaxKind::EmptyStat => Some(LuaStat::EmptyStat(LuaEmptyStat::cast(syntax)?)),
+            LuaSyntaxKind::GlobalStat => Some(LuaStat::GlobalStat(LuaGlobalStat::cast(syntax)?)),
             _ => None,
         }
     }
@@ -142,13 +146,13 @@ impl LuaAstNode for LuaLoopStat {
     where
         Self: Sized,
     {
-        match kind {
-            LuaSyntaxKind::WhileStat => true,
-            LuaSyntaxKind::RepeatStat => true,
-            LuaSyntaxKind::ForStat => true,
-            LuaSyntaxKind::ForRangeStat => true,
-            _ => false,
-        }
+        matches!(
+            kind,
+            LuaSyntaxKind::WhileStat
+                | LuaSyntaxKind::RepeatStat
+                | LuaSyntaxKind::ForStat
+                | LuaSyntaxKind::ForRangeStat
+        )
     }
 
     fn cast(syntax: LuaSyntaxNode) -> Option<Self>
@@ -215,18 +219,23 @@ impl LuaLocalStat {
         self.children()
     }
 
+    /// 仅从`AST`分析, 并不是绝对准确的, 因为允许最后一个表达式返回多个值
     pub fn get_local_name_by_value(&self, value: LuaExpr) -> Option<LuaLocalName> {
         let local_names = self.get_local_name_list();
         let value_exprs = self.get_value_exprs().collect::<Vec<_>>();
 
         for (i, local_name) in local_names.enumerate() {
-            if let Some(value_expr) = value_exprs.get(i) {
-                if value_expr.syntax() == value.syntax() {
-                    return Some(local_name);
-                }
+            if let Some(value_expr) = value_exprs.get(i)
+                && value_expr.syntax() == value.syntax()
+            {
+                return Some(local_name);
             }
         }
         None
+    }
+
+    pub fn get_attrib(&self) -> Option<LuaLocalAttribute> {
+        self.child()
     }
 }
 
@@ -267,7 +276,7 @@ impl LuaAssignStat {
         let mut exprs = Vec::new();
         let mut meet_assign = false;
         for child in self.syntax.children_with_tokens() {
-            if child.kind() == LuaTokenKind::TkAssign.into() {
+            if child.kind().to_token().is_assign_op() {
                 meet_assign = true;
             }
 
@@ -283,6 +292,17 @@ impl LuaAssignStat {
         }
 
         (vars, exprs)
+    }
+
+    pub fn get_assign_op(&self) -> Option<LuaGeneralToken> {
+        for child in self.syntax.children_with_tokens() {
+            if let Some(token) = child.into_token()
+                && token.kind().to_token().is_assign_op()
+            {
+                return LuaGeneralToken::cast(token);
+            }
+        }
+        None
     }
 }
 
@@ -361,6 +381,10 @@ impl LuaFuncStat {
 
     pub fn get_closure(&self) -> Option<LuaClosureExpr> {
         self.child()
+    }
+
+    pub fn is_global(&self) -> bool {
+        self.token_by_kind(LuaTokenKind::TkGlobal).is_some()
     }
 }
 
@@ -974,3 +998,48 @@ impl LuaAstNode for LuaEmptyStat {
 }
 
 impl LuaCommentOwner for LuaEmptyStat {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct LuaGlobalStat {
+    syntax: LuaSyntaxNode,
+}
+
+impl LuaAstNode for LuaGlobalStat {
+    fn syntax(&self) -> &LuaSyntaxNode {
+        &self.syntax
+    }
+
+    fn can_cast(kind: LuaSyntaxKind) -> bool
+    where
+        Self: Sized,
+    {
+        kind == LuaSyntaxKind::GlobalStat
+    }
+
+    fn cast(syntax: LuaSyntaxNode) -> Option<Self>
+    where
+        Self: Sized,
+    {
+        if syntax.kind() == LuaSyntaxKind::GlobalStat.into() {
+            Some(Self { syntax })
+        } else {
+            None
+        }
+    }
+}
+
+impl LuaCommentOwner for LuaGlobalStat {}
+
+impl LuaGlobalStat {
+    pub fn get_local_name_list(&self) -> LuaAstChildren<LuaLocalName> {
+        self.children()
+    }
+
+    pub fn get_attrib(&self) -> Option<LuaLocalAttribute> {
+        self.child()
+    }
+
+    pub fn is_any_global(&self) -> bool {
+        self.token_by_kind(LuaTokenKind::TkMul).is_some()
+    }
+}

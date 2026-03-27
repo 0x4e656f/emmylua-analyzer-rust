@@ -5,6 +5,7 @@ mod data;
 mod providers;
 mod resolve_completion;
 
+pub use add_completions::get_index_alias_name;
 use completion_builder::CompletionBuilder;
 use completion_data::CompletionData;
 use emmylua_code_analysis::{EmmyLuaAnalysis, FileId};
@@ -30,7 +31,7 @@ pub async fn on_completion_handler(
 ) -> Option<CompletionResponse> {
     let uri = params.text_document_position.text_document.uri;
     let position = params.text_document_position.position;
-    let analysis = context.analysis.read().await;
+    let analysis = context.analysis().read().await;
     let file_id = analysis.get_file_id(&uri)?;
     let semantic_model = analysis.compilation.get_semantic_model(file_id)?;
     if !semantic_model.get_emmyrc().completion.enable {
@@ -79,7 +80,13 @@ pub fn completion(
         }
     };
 
-    let mut builder = CompletionBuilder::new(token, semantic_model, cancel_token, trigger_kind);
+    let mut builder = CompletionBuilder::new(
+        token,
+        semantic_model,
+        cancel_token,
+        trigger_kind,
+        position_offset,
+    );
     add_completions(&mut builder);
     Some(CompletionResponse::Array(builder.get_completion_items()))
 }
@@ -89,9 +96,9 @@ pub async fn on_completion_resolve_handler(
     params: CompletionItem,
     _: CancellationToken,
 ) -> CompletionItem {
-    let analysis = context.analysis.read().await;
-    let config_manager = context.workspace_manager.read().await;
-    let client_id = config_manager.client_config.client_id;
+    let analysis = context.analysis().read().await;
+    let workspace_manager = context.workspace_manager().read().await;
+    let client_id = workspace_manager.client_config.client_id;
     completion_resolve(&analysis, params, client_id)
 }
 
@@ -134,8 +141,8 @@ impl RegisterCapabilities for CompletionCapabilities {
         server_capabilities.completion_provider = Some(CompletionOptions {
             resolve_provider: Some(true),
             trigger_characters: Some(
-                vec![".", ":", "(", "[", "\"", "\'", " ", "@", "\\", "/", "|"]
-                    .iter()
+                ['.', ':', '(', '[', '"', '\'', ' ', '@', '\\', '/', '|']
+                    .into_iter()
                     .map(|s| s.to_string())
                     .collect(),
             ),

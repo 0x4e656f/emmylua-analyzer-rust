@@ -1,20 +1,30 @@
+mod async_state;
+mod return_rows;
+#[allow(clippy::module_inception)]
+mod signature;
+
 use std::collections::{HashMap, HashSet};
 
+pub use async_state::AsyncState;
 pub use signature::{
-    LuaDocParamInfo, LuaDocReturnInfo, LuaNoDiscard, LuaSignature, LuaSignatureId,
-    SignatureReturnStatus,
+    LuaDocParamInfo, LuaDocReturnInfo, LuaDocReturnOverloadInfo, LuaGenericParamInfo, LuaNoDiscard,
+    LuaSignature, LuaSignatureId, SignatureReturnStatus,
 };
 
 use crate::FileId;
 
 use super::traits::LuaIndex;
 
-mod signature;
-
 #[derive(Debug)]
 pub struct LuaSignatureIndex {
     signatures: HashMap<LuaSignatureId, LuaSignature>,
     in_file_signatures: HashMap<FileId, HashSet<LuaSignatureId>>,
+}
+
+impl Default for LuaSignatureIndex {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl LuaSignatureIndex {
@@ -30,9 +40,7 @@ impl LuaSignatureIndex {
             .entry(signature_id.get_file_id())
             .or_default()
             .insert(signature_id);
-        self.signatures
-            .entry(signature_id)
-            .or_insert_with(LuaSignature::new)
+        self.signatures.entry(signature_id).or_default()
     }
 
     pub fn get(&self, signature_id: &LuaSignatureId) -> Option<&LuaSignature> {

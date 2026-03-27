@@ -6,29 +6,39 @@ use std::{collections::HashMap, sync::Arc};
 use emmylua_parser::{LuaAstNode, LuaClosureExpr, LuaDocFuncType};
 use rowan::TextSize;
 
+use super::return_rows;
+use crate::db_index::signature::async_state::AsyncState;
 use crate::{
-    db_index::{LuaFunctionType, LuaType},
     FileId,
+    db_index::{LuaFunctionType, LuaType},
 };
-use crate::{SemanticModel, VariadicType};
+use crate::{LuaAttributeUse, SemanticModel, first_param_may_not_self};
 
 #[derive(Debug)]
 pub struct LuaSignature {
-    pub generic_params: Vec<(String, Option<LuaType>)>,
+    pub generic_params: Vec<Arc<LuaGenericParamInfo>>,
     pub overloads: Vec<Arc<LuaFunctionType>>,
     pub param_docs: HashMap<usize, LuaDocParamInfo>,
     pub params: Vec<String>,
     pub return_docs: Vec<LuaDocReturnInfo>,
+    pub return_overloads: Vec<LuaDocReturnOverloadInfo>,
     pub resolve_return: SignatureReturnStatus,
     pub is_colon_define: bool,
-    pub is_async: bool,
+    pub async_state: AsyncState,
     pub nodiscard: Option<LuaNoDiscard>,
+    pub is_vararg: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LuaNoDiscard {
     NoDiscard,
     NoDiscardWithMessage(Box<String>),
+}
+
+impl Default for LuaSignature {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl LuaSignature {
@@ -39,10 +49,12 @@ impl LuaSignature {
             param_docs: HashMap::new(),
             params: Vec::new(),
             return_docs: Vec::new(),
+            return_overloads: Vec::new(),
             resolve_return: SignatureReturnStatus::UnResolve,
             is_colon_define: false,
-            is_async: false,
+            async_state: AsyncState::None,
             nodiscard: None,
+            is_vararg: false,
         }
     }
 
@@ -80,10 +92,10 @@ impl LuaSignature {
     pub fn get_param_name_by_id(&self, idx: usize) -> Option<String> {
         if idx < self.params.len() {
             return Some(self.params[idx].clone());
-        } else if let Some(name) = self.params.last() {
-            if name == "..." {
-                return Some(name.clone());
-            }
+        } else if let Some(name) = self.params.last()
+            && name == "..."
+        {
+            return Some(name.clone());
         }
 
         None
@@ -92,29 +104,29 @@ impl LuaSignature {
     pub fn get_param_info_by_id(&self, idx: usize) -> Option<&LuaDocParamInfo> {
         if idx < self.params.len() {
             return self.param_docs.get(&idx);
-        } else if let Some(name) = self.params.last() {
-            if name == "..." {
-                return self.param_docs.get(&(self.params.len() - 1));
-            }
+        } else if let Some(name) = self.params.last()
+            && name == "..."
+        {
+            return self.param_docs.get(&(self.params.len() - 1));
         }
 
         None
     }
 
     pub fn get_return_type(&self) -> LuaType {
-        match self.return_docs.len() {
-            0 => LuaType::Nil,
-            1 => self.return_docs[0].type_ref.clone(),
-            _ => LuaType::Variadic(
-                VariadicType::Multi(
-                    self.return_docs
-                        .iter()
-                        .map(|info| info.type_ref.clone())
-                        .collect(),
-                )
-                .into(),
-            ),
-        }
+        return_rows::get_return_type(&self.return_docs, &self.return_overloads)
+    }
+
+    pub(crate) fn get_overload_row_slot(row: &[LuaType], idx: usize) -> LuaType {
+        return_rows::get_overload_row_slot(row, idx)
+    }
+
+    pub(crate) fn row_to_return_type(row: Vec<LuaType>) -> LuaType {
+        return_rows::row_to_return_type(row)
+    }
+
+    pub(crate) fn return_type_to_row(return_type: LuaType) -> Vec<LuaType> {
+        return_rows::return_type_to_row(return_type)
     }
 
     pub fn is_method(&self, semantic_model: &SemanticModel, owner_type: Option<&LuaType>) -> bool {
@@ -130,16 +142,10 @@ impl LuaSignature {
             match owner_type {
                 Some(owner_type) => {
                     // 一些类型不应该被视为 method
-                    match (owner_type, param_type) {
-                        (LuaType::Ref(_) | LuaType::Def(_), _) => {
-                            if param_type.is_any()
-                                || param_type.is_table()
-                                || param_type.is_class_tpl()
-                            {
-                                return false;
-                            }
-                        }
-                        _ => {}
+                    if matches!(owner_type, LuaType::Ref(_) | LuaType::Def(_))
+                        && first_param_may_not_self(param_type)
+                    {
+                        return false;
                     }
 
                     semantic_model
@@ -156,19 +162,26 @@ impl LuaSignature {
     pub fn to_doc_func_type(&self) -> Arc<LuaFunctionType> {
         let params = self.get_type_params();
         let return_type = self.get_return_type();
-        let func_type =
-            LuaFunctionType::new(self.is_async, self.is_colon_define, params, return_type);
+        let is_vararg = self.is_vararg;
+        let func_type = LuaFunctionType::new(
+            self.async_state,
+            self.is_colon_define,
+            is_vararg,
+            params,
+            return_type,
+        );
         Arc::new(func_type)
     }
 
     pub fn to_call_operator_func_type(&self) -> Arc<LuaFunctionType> {
         let mut params = self.get_type_params();
-        if params.len() > 0 && !self.is_colon_define {
+        if !params.is_empty() && !self.is_colon_define {
             params.remove(0);
         }
 
         let return_type = self.get_return_type();
-        let func_type = LuaFunctionType::new(self.is_async, false, params, return_type);
+        let func_type =
+            LuaFunctionType::new(self.async_state, false, self.is_vararg, params, return_type);
         Arc::new(func_type)
     }
 }
@@ -179,12 +192,29 @@ pub struct LuaDocParamInfo {
     pub type_ref: LuaType,
     pub nullable: bool,
     pub description: Option<String>,
+    pub attributes: Option<Vec<LuaAttributeUse>>,
 }
 
-#[derive(Debug)]
+impl LuaDocParamInfo {
+    pub fn get_attribute_by_name(&self, name: &str) -> Option<&LuaAttributeUse> {
+        self.attributes
+            .iter()
+            .flatten()
+            .find(|attr| attr.id.get_name() == name)
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct LuaDocReturnInfo {
     pub name: Option<String>,
     pub type_ref: LuaType,
+    pub description: Option<String>,
+    pub attributes: Option<Vec<LuaAttributeUse>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LuaDocReturnOverloadInfo {
+    pub type_refs: Vec<LuaType>,
     pub description: Option<String>,
 }
 
@@ -275,4 +305,25 @@ pub enum SignatureReturnStatus {
     UnResolve,
     DocResolve,
     InferResolve,
+}
+
+#[derive(Debug, Clone)]
+pub struct LuaGenericParamInfo {
+    pub name: String,
+    pub constraint: Option<LuaType>,
+    pub attributes: Option<Vec<LuaAttributeUse>>,
+}
+
+impl LuaGenericParamInfo {
+    pub fn new(
+        name: String,
+        constraint: Option<LuaType>,
+        attributes: Option<Vec<LuaAttributeUse>>,
+    ) -> Self {
+        Self {
+            name,
+            constraint,
+            attributes,
+        }
+    }
 }
