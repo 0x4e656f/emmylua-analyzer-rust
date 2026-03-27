@@ -24,7 +24,7 @@ use tokio_util::sync::CancellationToken;
 use crate::context::ServerContextSnapshot;
 
 use super::RegisterCapabilities;
-use comment::build_doc_region_symbol;
+use comment::{build_doc_region_symbol, build_mark_symbol};
 
 pub async fn on_document_symbol(
     context: ServerContextSnapshot,
@@ -95,6 +95,7 @@ fn process_comment(
     comment: &LuaComment,
     parent_id: LuaSyntaxId,
 ) {
+    build_mark_symbol(builder, comment.clone(), parent_id);
     build_doc_region_symbol(builder, comment.clone(), parent_id);
 }
 
